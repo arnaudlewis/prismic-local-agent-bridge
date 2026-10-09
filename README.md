@@ -26,6 +26,20 @@ Environment:
 - `PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS` (default `300000`): the ChatGPT access token is refreshed, and the agent restarted, when it has less validity left than this.
 - `XDG_CONFIG_HOME`: data directory is `$XDG_CONFIG_HOME/prismic-local-agent-bridge` (default `~/.config/...`). It holds `credentials.json` (mode 600), `host.json` and `codex-home/`.
 
+## Demo quick start
+
+```sh
+cd ~/DevTools/workspace/prismic-local-agent-bridge
+npm install            # first time only
+npm start -- --project ~/DevTools/workspace/poc-agent-project
+```
+
+1. Read `Pairing code: <code>` in the banner, enter it in the "Local agent" panel of wroom.
+2. "Continue with ChatGPT" opens your browser. If you close that window, click "Restart sign-in" in the panel (the authorization URL is also printed in the terminal).
+3. Pick a model and reasoning effort, then chat. `--project` is only the agent's working directory; document access goes through the Prismic MCP.
+
+After a daemon restart you must pair again (tokens live in memory), but the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
+
 ## Use with wroom
 
 In `packages/wroom/.env.local`:
