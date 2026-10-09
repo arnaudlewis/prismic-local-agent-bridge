@@ -1,0 +1,171 @@
+import { createServer } from "node:http"
+import type { IncomingMessage, ServerResponse } from "node:http"
+import type { Duplex } from "node:stream"
+import { WebSocketServer } from "ws"
+import { z } from "zod"
+
+import type { ChatGptAuth } from "./chatgptAuth.ts"
+import {
+  HttpError,
+  applyCors,
+  getAllowedOrigin,
+  getBearerToken,
+  isAllowedHost,
+  readJsonBody,
+  sendHtml,
+  sendJson,
+} from "./httpUtils.ts"
+import type { Pairing } from "./pairing.ts"
+import { bridgeInfo, windowIdPattern } from "./protocol.ts"
+import type { AgentMode, StatusResponse } from "./protocol.ts"
+import type { WindowChannels } from "./windowChannels.ts"
+
+const windowPathPattern = new RegExp(`^/windows/(${windowIdPattern.source.slice(1, -1)})$`, "i")
+
+const PairBodySchema = z.object({ code: z.string() })
+
+interface StartBridgeServerArgs {
+  port: number
+  allowedOrigins: string[]
+  projectDir: string
+  agentMode: AgentMode
+  model: string | undefined
+  pairing: Pairing
+  channels: WindowChannels
+  auth: ChatGptAuth
+}
+
+export interface BridgeServer {
+  close(): Promise<void>
+}
+
+export async function startBridgeServer(args: StartBridgeServerArgs): Promise<BridgeServer> {
+  const { port, allowedOrigins, projectDir, agentMode, model, pairing, channels, auth } = args
+
+  async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`)
+    const method = req.method ?? "GET"
+    const isCallback = method === "GET" && url.pathname === "/auth/callback"
+
+    if (!isAllowedHost(req, port)) throw new HttpError(403, "Forbidden host")
+
+    const allowedOrigin = getAllowedOrigin(req, allowedOrigins)
+    if (req.headers.origin !== undefined && allowedOrigin === undefined && !isCallback) {
+      throw new HttpError(403, "Forbidden origin")
+    }
+    applyCors(res, allowedOrigin)
+
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Private-Network": "true",
+        "Access-Control-Max-Age": "600",
+      })
+      res.end()
+      return
+    }
+
+    if (method === "GET" && url.pathname === "/health") {
+      sendJson(res, 200, bridgeInfo)
+      return
+    }
+
+    if (method === "POST" && url.pathname === "/pair") {
+      const body = PairBodySchema.safeParse(await readJsonBody(req))
+      if (!body.success) throw new HttpError(400, "invalid_request")
+      const token = pairing.tryPair(body.data.code)
+      if (token === undefined) throw new HttpError(401, "invalid_code")
+      sendJson(res, 200, { token })
+      return
+    }
+
+    if (isCallback) {
+      const result = await auth.handleCallback(url)
+      sendHtml(res, result.ok ? 200 : 400, result.ok ? "Signed in" : "Sign-in failed", result.message)
+      return
+    }
+
+    if (method === "GET" && url.pathname === "/status") {
+      requireToken(req, pairing)
+      const status: StatusResponse = { projectDir, agentMode, model, chatgpt: auth.getStatus() }
+      sendJson(res, 200, status)
+      return
+    }
+
+    if (method === "POST" && url.pathname === "/auth/chatgpt/start") {
+      requireToken(req, pairing)
+      sendJson(res, 200, { authorizationUrl: auth.startSignIn() })
+      return
+    }
+
+    if (method === "POST" && url.pathname === "/auth/chatgpt/sign-out") {
+      requireToken(req, pairing)
+      await auth.signOut()
+      res.writeHead(204)
+      res.end()
+      return
+    }
+
+    throw new HttpError(404, "not_found")
+  }
+
+  const server = createServer((req, res) => {
+    route(req, res).catch((error: unknown) => {
+      if (error instanceof HttpError) {
+        sendJson(res, error.status, { error: error.message })
+        return
+      }
+      console.error(`Request failed: ${error instanceof Error ? error.message : String(error)}`)
+      sendJson(res, 500, { error: "internal_error" })
+    })
+  })
+
+  const wss = new WebSocketServer({ noServer: true })
+
+  function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
+    socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`)
+    socket.destroy()
+  }
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`)
+    const windowId = windowPathPattern.exec(url.pathname)?.[1]
+    if (windowId === undefined) return rejectUpgrade(socket, 404, "Not Found")
+    if (!isAllowedHost(req, port)) return rejectUpgrade(socket, 403, "Forbidden")
+    if (getAllowedOrigin(req, allowedOrigins) === undefined) return rejectUpgrade(socket, 403, "Forbidden")
+
+    const token = url.searchParams.get("token")
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      if (token === null || !pairing.isValidToken(token)) {
+        ws.close(4401, "unauthorized")
+        return
+      }
+      channels.attach(windowId, ws)
+    })
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", reject)
+      resolve()
+    })
+  })
+
+  return {
+    close() {
+      return new Promise((resolve) => {
+        for (const client of wss.clients) client.terminate()
+        wss.close()
+        server.close(() => resolve())
+        server.closeAllConnections()
+      })
+    },
+  }
+}
+
+function requireToken(req: IncomingMessage, pairing: Pairing): void {
+  const token = getBearerToken(req)
+  if (token === undefined || !pairing.isValidToken(token)) throw new HttpError(401, "unauthorized")
+}
