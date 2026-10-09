@@ -67,6 +67,13 @@ export function buildAuthorizationUrl(args: BuildAuthorizationUrlArgs): string {
   return url.href
 }
 
+function redactAuthorizationUrl(authorizationUrl: string): string {
+  const url = new URL(authorizationUrl)
+  url.searchParams.delete("id_token_hint")
+  url.searchParams.delete("login_hint")
+  return url.href
+}
+
 interface ClassifyRefreshFailureArgs {
   status: number
   errorCode: string | undefined
@@ -164,6 +171,8 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
   let attempt: PendingAttempt | undefined
   let lastError: string | undefined
   let refreshing: Promise<AccessToken> | undefined
+  // Bumped by signOut so in-flight sign-ins and refreshes can't write credentials back afterwards.
+  let generation = 0
 
   function currentAttempt(): PendingAttempt | undefined {
     if (attempt !== undefined && attempt.expiresAt < Date.now()) attempt = undefined
@@ -230,7 +239,7 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     }
     lastError = undefined
 
-    console.info(`Sign in with ChatGPT: ${authorizationUrl}`)
+    console.info(`Sign in with ChatGPT: ${redactAuthorizationUrl(authorizationUrl)}`)
     openBrowser(authorizationUrl)
     return authorizationUrl
   }
@@ -240,6 +249,7 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     if (pending === undefined) return fail("No ChatGPT sign-in is in progress. Start again from Prismic.")
     if (url.searchParams.get("state") !== pending.state) return { ok: false, message: "Invalid sign-in state." }
     attempt = undefined
+    const startedGeneration = generation
 
     const errorParam = url.searchParams.get("error")
     if (errorParam !== null) {
@@ -264,7 +274,8 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
 
     try {
       const tokens = await exchangeCode({ clientId, code, verifier: pending.verifier })
-      await saveSignedInCredentials({ clientId, tokens, pending })
+      if (generation !== startedGeneration) throw new Error("signed out while signing in")
+      await saveSignedInCredentials({ clientId, tokens, pending, startedGeneration })
       await logAvailableModels(tokens.access_token)
       return { ok: true, message: "Signed in to ChatGPT. You can close this tab and go back to Prismic." }
     } catch (error) {
@@ -299,11 +310,13 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     clientId: string
     tokens: TokenResponse
     pending: PendingAttempt
+    startedGeneration: number
   }): Promise<void> {
-    const { clientId, tokens, pending } = saveArgs
+    const { clientId, tokens, pending, startedGeneration } = saveArgs
     if (tokens.id_token === undefined) throw new Error("no ID token in the token response")
 
     const { payload } = await jwtVerify(tokens.id_token, jwks, { issuer, audience: clientId })
+    if (generation !== startedGeneration) throw new Error("signed out while signing in")
     if (payload.nonce !== pending.nonce) throw new Error("ID token nonce mismatch")
     if (payload.sub === undefined) throw new Error("ID token has no subject")
     if (pending.reauthorization !== undefined && payload.sub !== pending.reauthorization.subject) {
@@ -340,13 +353,13 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     ) {
       return Promise.resolve({ accessToken: saved.accessToken, expiresAt: saved.expiresAt })
     }
-    refreshing ??= refreshTokens(saved).finally(() => {
+    refreshing ??= refreshTokens(saved, generation).finally(() => {
       refreshing = undefined
     })
     return refreshing
   }
 
-  async function refreshTokens(saved: Credentials): Promise<AccessToken> {
+  async function refreshTokens(saved: Credentials, startedGeneration: number): Promise<AccessToken> {
     if (saved.refreshToken === undefined) {
       clearTokens("The ChatGPT session expired. Sign in again.")
       throw new ChatGptAuthError("signed_out", "The ChatGPT session expired")
@@ -365,8 +378,11 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
       throw new ChatGptAuthError("refresh_failed", "Could not reach the ChatGPT token endpoint")
     }
 
+    if (generation !== startedGeneration) throw signedOutDuringRefresh()
+
     if (!response.ok) {
       const errorCode = await readErrorCode(response)
+      if (generation !== startedGeneration) throw signedOutDuringRefresh()
       console.warn(`ChatGPT token refresh failed: status ${response.status}, error ${errorCode ?? "unknown"}`)
       const failure = classifyRefreshFailure({ status: response.status, errorCode })
       if (failure === "transient") {
@@ -377,6 +393,7 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     }
 
     const parsed = TokenResponseSchema.safeParse(await response.json().catch(() => undefined))
+    if (generation !== startedGeneration) throw signedOutDuringRefresh()
     const accessToken = parsed.success ? parsed.data.access_token : undefined
     if (!parsed.success || accessToken === undefined) {
       throw new ChatGptAuthError("refresh_failed", "Unexpected token refresh response")
@@ -395,7 +412,12 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
     return { accessToken, expiresAt }
   }
 
+  function signedOutDuringRefresh(): ChatGptAuthError {
+    return new ChatGptAuthError("signed_out", "Signed out while the ChatGPT session was refreshing")
+  }
+
   async function signOut(): Promise<void> {
+    generation += 1
     attempt = undefined
     const refreshToken = credentials?.refreshToken
     if (credentials !== undefined && refreshToken !== undefined) {

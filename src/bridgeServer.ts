@@ -43,11 +43,12 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   const { port, allowedOrigins, projectDir, agentMode, model, pairing, channels, auth } = args
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`)
+    if (!isAllowedHost(req, port)) throw new HttpError(403, "Forbidden host")
+
+    const url = parseOriginFormUrl(req.url, port)
+    if (url === undefined) throw new HttpError(400, "bad_request")
     const method = req.method ?? "GET"
     const isCallback = method === "GET" && url.pathname === "/auth/callback"
-
-    if (!isAllowedHost(req, port)) throw new HttpError(403, "Forbidden host")
 
     const allowedOrigin = getAllowedOrigin(req, allowedOrigins)
     if (req.headers.origin !== undefined && allowedOrigin === undefined && !isCallback) {
@@ -72,6 +73,11 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     }
 
     if (method === "POST" && url.pathname === "/pair") {
+      const retryAfterMs = pairing.cooldownRemainingMs()
+      if (retryAfterMs > 0) {
+        res.setHeader("Retry-After", String(Math.ceil(retryAfterMs / 1000)))
+        throw new HttpError(429, "too_many_attempts")
+      }
       const body = PairBodySchema.safeParse(await readJsonBody(req))
       if (!body.success) throw new HttpError(400, "invalid_request")
       const token = pairing.tryPair(body.data.code)
@@ -129,11 +135,14 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   }
 
   server.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`)
-    const windowId = windowPathPattern.exec(url.pathname)?.[1]
-    if (windowId === undefined) return rejectUpgrade(socket, 404, "Not Found")
+    socket.on("error", () => socket.destroy())
     if (!isAllowedHost(req, port)) return rejectUpgrade(socket, 403, "Forbidden")
     if (getAllowedOrigin(req, allowedOrigins) === undefined) return rejectUpgrade(socket, 403, "Forbidden")
+
+    const url = parseOriginFormUrl(req.url, port)
+    if (url === undefined) return rejectUpgrade(socket, 400, "Bad Request")
+    const windowId = windowPathPattern.exec(url.pathname)?.[1]
+    if (windowId === undefined) return rejectUpgrade(socket, 404, "Not Found")
 
     const token = url.searchParams.get("token")
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -162,6 +171,15 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
         server.closeAllConnections()
       })
     },
+  }
+}
+
+function parseOriginFormUrl(target: string | undefined, port: number): URL | undefined {
+  if (target === undefined || !target.startsWith("/") || target.startsWith("//")) return undefined
+  try {
+    return new URL(target, `http://127.0.0.1:${port}`)
+  } catch {
+    return undefined
   }
 }
 

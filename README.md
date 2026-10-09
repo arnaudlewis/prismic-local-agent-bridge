@@ -41,7 +41,7 @@ Open the agent panel, pick "Local agent", enter the pairing code, then "Continue
 
 - Bound to `127.0.0.1`; requests must carry a `127.0.0.1:<port>` or `localhost:<port>` Host header.
 - Browser requests and WebSocket upgrades must come from an allowed origin (`/auth/callback` is exempt and validated by `state`).
-- API and WebSocket access needs a token obtained by pairing; tokens live in memory only. Five wrong codes rotate the code.
+- API and WebSocket access needs a token obtained by pairing; tokens live in memory only. Five wrong codes rotate the code and start a cooldown (30 s, doubling up to 15 min, reset by a successful pair) during which `/pair` returns 429.
 - Tokens (pairing, ChatGPT, Prismic) are never logged.
 
 ## Checks
