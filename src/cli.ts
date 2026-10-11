@@ -6,6 +6,7 @@ import { parseArgs } from "node:util"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { createChatGptAuth } from "./chatgptAuth.ts"
+import { isolatedCodexHomePath, resolveUserCodexHome } from "./codexConfig.ts"
 import { createPairing } from "./pairing.ts"
 import { agentModes, bridgeInfo } from "./protocol.ts"
 import type { AgentMode } from "./protocol.ts"
@@ -27,6 +28,7 @@ async function main(): Promise<void> {
   const dataDir = join(configHome, "prismic-local-agent-bridge")
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 
+  const userCodexHome = options.useUserCodex ? resolveUserCodexHome() : undefined
   const pairing = createPairing({ onCodeChanged: (code) => console.info(`Pairing code: ${code}`) })
   const channels = createWindowChannels()
   const auth = createChatGptAuth({ dataDir, redirectUri: `http://127.0.0.1:${options.port}/auth/callback` })
@@ -34,6 +36,7 @@ async function main(): Promise<void> {
     channels,
     auth,
     dataDir,
+    userCodexHome,
     projectDir: options.projectDir,
     agentMode: options.agentMode,
     model: options.model,
@@ -55,6 +58,11 @@ async function main(): Promise<void> {
   console.info(`Listening on http://127.0.0.1:${options.port}`)
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
   console.info(`Agent mode: ${options.agentMode}${options.model === undefined ? "" : `, model: ${options.model}`}`)
+  console.info(
+    userCodexHome === undefined
+      ? `Codex home: ${isolatedCodexHomePath(dataDir)} (isolated)`
+      : `Codex home: ${userCodexHome} (user)`,
+  )
   console.info(`ChatGPT: ${auth.getStatus().status}`)
   console.info(`Pairing code: ${pairing.currentCode()}`)
 
@@ -72,6 +80,7 @@ interface CliOptions {
   origins: string[]
   model: string | undefined
   agentMode: AgentMode
+  useUserCodex: boolean
   refreshMarginMs: number
 }
 
@@ -83,6 +92,7 @@ function parseOptions(): CliOptions {
       origin: { type: "string", multiple: true },
       model: { type: "string" },
       "agent-mode": { type: "string" },
+      "use-user-codex": { type: "boolean" },
     },
     strict: true,
   })
@@ -111,6 +121,7 @@ function parseOptions(): CliOptions {
     origins: values.origin ?? [defaultOrigin],
     model,
     agentMode,
+    useUserCodex: values["use-user-codex"] ?? false,
     refreshMarginMs,
   }
 }

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto"
 import { Readable, Writable } from "node:stream"
 import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclientprotocol/sdk"
 import type {
+  AvailableCommand,
   Client,
   McpServer,
   RequestPermissionRequest,
@@ -15,8 +16,8 @@ import type {
 
 import { ChatGptAuthError } from "./chatgptAuth.ts"
 import type { ChatGptAuth, ChatGptAuthErrorCode } from "./chatgptAuth.ts"
-import { resolveCodexAcpBin, writeCodexHome } from "./codexConfig.ts"
-import type { AgentMode, BridgeConfigOption, BridgeEvent, ClientMessage, Session } from "./protocol.ts"
+import { buildCodexConfigEnv, resolveCodexAcpBin, writeCodexHome } from "./codexConfig.ts"
+import type { AgentMode, BridgeCommand, BridgeConfigOption, BridgeEvent, ClientMessage, Session } from "./protocol.ts"
 import { bridgeInfo } from "./protocol.ts"
 import type { WindowChannels } from "./windowChannels.ts"
 
@@ -33,6 +34,8 @@ interface CreateAgentSessionsArgs {
   channels: WindowChannels
   auth: ChatGptAuth
   dataDir: string
+  // Set with --use-user-codex: run against this existing Codex home instead of an isolated one.
+  userCodexHome: string | undefined
   projectDir: string
   agentMode: AgentMode
   model: string | undefined
@@ -65,6 +68,7 @@ interface AgentFields {
   replaying: boolean
   preambleSent: boolean
   configOptions: SessionConfigOption[]
+  availableCommands: BridgeCommand[]
   pendingPermissions: Map<string, PendingPermission>
 }
 
@@ -96,7 +100,7 @@ interface AgentExitArgs {
 class StartAbortedError extends Error {}
 
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
-  const { channels, auth, dataDir, projectDir, agentMode, model, refreshMarginMs } = args
+  const { channels, auth, dataDir, userCodexHome, projectDir, agentMode, model, refreshMarginMs } = args
   const states = new Map<string, WindowState>()
 
   function send(windowId: string, event: BridgeEvent): void {
@@ -118,6 +122,16 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
 
   function sendSessionConfig(windowId: string, agent: AgentFields): void {
     send(windowId, { type: "session_config", options: toBridgeConfigOptions(agent.configOptions) })
+  }
+
+  function sendAvailableCommands(windowId: string, agent: AgentFields): void {
+    if (agent.availableCommands.length === 0) return
+    send(windowId, { type: "available_commands", commands: agent.availableCommands })
+  }
+
+  function sendAgentState(windowId: string, agent: AgentFields): void {
+    sendSessionConfig(windowId, agent)
+    sendAvailableCommands(windowId, agent)
   }
 
   async function handleMessage(windowId: string, message: ClientMessage): Promise<void> {
@@ -146,7 +160,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const before = state.agent
     const ready = await ensureAgent(windowId, message.session)
     if (ready && state.agent !== undefined && state.agent === before) {
-      sendSessionConfig(windowId, state.agent)
+      sendAgentState(windowId, state.agent)
     }
     send(windowId, { type: "chat_status", status: "idle" })
   }
@@ -171,7 +185,10 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     }
 
     const prompt = [{ type: "text" as const, text: message.text }]
-    if (!agent.preambleSent) {
+    // codex-acp only parses a command from the first text block, and a handled command never reaches the model,
+    // so the preamble is held back until the next regular prompt. Detected by shape, not by the command list,
+    // which may not have arrived yet right after the agent starts.
+    if (!agent.preambleSent && !isSlashCommand(message.text)) {
       prompt.unshift({ type: "text", text: buildPreamble(message.session) })
       agent.preambleSent = true
     }
@@ -304,13 +321,16 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const { windowId, state, session, accessToken, startedWith, resumeSessionId } = startArgs
     const generation = state.generation
 
-    const codexHome = writeCodexHome({ dataDir, model })
+    const codexEnv =
+      userCodexHome === undefined
+        ? { CODEX_HOME: writeCodexHome({ dataDir, model }) }
+        : { CODEX_HOME: userCodexHome, CODEX_CONFIG: buildCodexConfigEnv({ model }) }
     const child = spawn(process.execPath, [resolveCodexAcpBin()], {
       cwd: projectDir,
       stdio: ["pipe", "pipe", "inherit"],
       env: {
         ...process.env,
-        CODEX_HOME: codexHome,
+        ...codexEnv,
         ACCESS_TOKEN: accessToken,
         MODEL_PROVIDER: "openai_chatgpt_plan",
         INITIAL_AGENT_MODE: agentMode,
@@ -337,6 +357,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       replaying: false,
       preambleSent: false,
       configOptions: [],
+      availableCommands: [],
       pendingPermissions: new Map(),
     }
 
@@ -397,7 +418,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       state.agent = agent
 
       await applySelectedConfig(state, agent)
-      sendSessionConfig(windowId, agent)
+      sendAgentState(windowId, agent)
     } catch (error) {
       child.kill("SIGTERM")
       throw error
@@ -448,9 +469,15 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function handleSessionUpdate(windowId: string, agent: AgentFields, notification: SessionNotification): void {
-    if (agent.replaying) return
     if (agent.sessionId !== "" && notification.sessionId !== agent.sessionId) return
     const update = notification.update
+    if (update.sessionUpdate === "available_commands_update") {
+      // Kept even while replaying: it is session state, not history, and is re-sent once the agent is ready.
+      agent.availableCommands = update.availableCommands.map(toBridgeCommand)
+      if (!agent.replaying) sendAvailableCommands(windowId, agent)
+      return
+    }
+    if (agent.replaying) return
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type !== "text") return
@@ -574,6 +601,15 @@ function flattenSelectValues(options: SessionConfigSelectOptions): BridgeConfigO
     }
   }
   return values
+}
+
+export function toBridgeCommand(command: AvailableCommand): BridgeCommand {
+  const hint = command.input?.hint
+  return { name: command.name, description: command.description, ...(hint === undefined ? {} : { hint }) }
+}
+
+export function isSlashCommand(text: string): boolean {
+  return /^\/[A-Za-z][\w-]*(\s|$)/.test(text.trim())
 }
 
 function toBridgeConfigOptions(options: SessionConfigOption[]): BridgeConfigOption[] {

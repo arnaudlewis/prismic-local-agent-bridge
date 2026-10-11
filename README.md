@@ -20,6 +20,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--origin` | `http://localhost:5173` | Allowed browser origin. Repeatable. |
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
 | `--agent-mode` | `read-only` | `read-only`, `workspace-write` or `agent`. |
+| `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 
 Environment:
 
@@ -39,6 +40,30 @@ npm start -- --project ~/DevTools/workspace/poc-agent-project
 3. Pick a model and reasoning effort, then chat. `--project` is only the agent's working directory; document access goes through the Prismic MCP.
 
 After a daemon restart you must pair again (tokens live in memory), but the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
+
+## Codex home
+
+By default the agent runs in an isolated Codex home, `<data dir>/codex-home`, which the bridge writes (`config.toml` with the ChatGPT plan provider). The banner shows `Codex home: <path> (isolated)`.
+
+With `--use-user-codex` the agent runs with `CODEX_HOME` (or `~/.codex` when unset), which must exist; the banner shows `(user)`. The bridge never writes into that directory and never reads or copies `config.toml` or `auth.json`. The ChatGPT plan provider is injected through codex-acp's `CODEX_CONFIG` environment variable instead, so billing still goes to the bridge's ChatGPT sign-in. `--model` is applied the same way.
+
+Reused from your Codex home: MCP servers from `config.toml`, skills, `AGENTS.md`, hooks, profiles, and your own `model` (unless `--model` is given). Skills in `~/.agents/skills` are visible in both modes.
+
+Not reused: `approval_policy` and `sandbox_mode`. codex-acp sets both on every turn from the agent mode, so `--agent-mode` (default `read-only`) always wins.
+
+Risks of `--use-user-codex`:
+
+- An agent triggered from the browser can call every MCP server you configured, with your hooks and instructions.
+- Permission requests still go through the permission cards in the browser.
+- Sessions are written into your Codex home (`sessions/`).
+- If your `config.toml` defines an MCP server named `prismic`, codex-acp keeps yours and silently drops the bridge's window-bound one.
+- If your own `model` isn't available on the ChatGPT plan, turns fail until you pick another model in the panel or pass `--model`.
+
+## Slash commands and skills
+
+codex-acp publishes its commands (built-ins such as `status`, `review`, `compact`, plus skills named `$<skill>`) in an `available_commands_update`. The bridge relays it as `{ "type": "available_commands", "commands": [{ "name", "description", "hint"? }] }` whenever it changes, and again after `session_config` on `chat_open`. `hint` comes from the command's input hint.
+
+A prompt starting with `/<name>` is sent as plain text, exactly as typed, and stays the first content block, which is where codex-acp looks for a command. The Prismic preamble is not added to such a prompt. It is held back and added to the next regular prompt, because a handled command never reaches the model.
 
 ## Use with wroom
 

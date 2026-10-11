@@ -46,9 +46,16 @@ export interface BridgeConfigOption {
   values: Array<{ value: string; name: string; description?: string }>
 }
 
+export interface BridgeCommand {
+  name: string
+  description: string
+  hint?: string
+}
+
 export type BridgeEvent =
   | { type: "chat_status"; status: "idle" | "starting" | "running" }
   | { type: "session_config"; options: BridgeConfigOption[] }
+  | { type: "available_commands"; commands: BridgeCommand[] }
   | { type: "agent_message_chunk"; text: string; messageId?: string }
   | { type: "tool_call"; toolCallId: string; title: string; status: ToolCallStatus }
   | { type: "tool_call_update"; toolCallId: string; title?: string; status?: ToolCallStatus }
