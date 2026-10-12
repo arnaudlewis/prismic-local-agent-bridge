@@ -18,6 +18,9 @@ export function cancelPendingPermissions(ctx: Context, conversation: Conversatio
 // Bumping the generation makes every in-flight continuation and every late callback of the old agent stale.
 export function stopAgent(ctx: Context, conversation: Conversation): ChildProcess | undefined {
   conversation.generation += 1
+  // A child that is still handshaking isn't conversation.process yet, and must not outlive the stop.
+  conversation.startingChild?.kill("SIGTERM")
+  conversation.startingChild = undefined
   const agent = conversation.process
   conversation.process = undefined
   if (agent === undefined) return undefined

@@ -6,7 +6,7 @@ import type { Client, McpServer, RequestPermissionResponse } from "@agentclientp
 
 import { AgentAuthError } from "../agents/provider.ts"
 import { browserWindowId } from "../channelKey.ts"
-import type { AgentCredentials } from "../agents/provider.ts"
+import type { AgentCredentials, AgentProvider } from "../agents/provider.ts"
 import { errorMessage } from "../errors.ts"
 import { bridgeInfo } from "../protocol.ts"
 import type { Session } from "../protocol.ts"
@@ -38,20 +38,40 @@ export function ensureAgent(ctx: Context, conversation: Conversation, windowId: 
   })
 }
 
+type EnsureOutcome = "ready" | "failed" | "abandoned" | "stale"
+
+// Credentials can change while an agent is getting ready (a key replaced or removed). Each attempt notices that and
+// gives up on its stale credentials; the second attempt authenticates again, which either gets the new key or tells
+// the user there is none. A second staleness is a user flapping the key: the start is abandoned.
 async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const outcome = await tryEnsureAgent(ctx, conversation, windowId, session)
+    if (outcome === "ready") return true
+    if (outcome !== "stale") return false
+  }
+  return abandonEnsure(ctx, conversation)
+}
+
+class StaleCredentialsError extends Error {}
+
+async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId: string, session: Session): Promise<EnsureOutcome> {
   // Everything below awaits something; a delete in the meantime must not leave notices or an agent behind.
   const entryGeneration = conversation.generation
+  let provider: AgentProvider
   let credentials: AgentCredentials
   try {
-    credentials = await providerOf(ctx, conversation).authenticate()
+    provider = providerOf(ctx, conversation)
+    credentials = await provider.authenticate()
   } catch (error) {
-    if (conversation.generation !== entryGeneration) return abandonEnsure(ctx, conversation)
+    if (conversation.generation !== entryGeneration) return abandon(ctx, conversation)
     const text = error instanceof AgentAuthError ? error.notice : `Agent error: ${errorMessage(error)}`
     notify(ctx, conversation, "error", text)
     setStatus(ctx, conversation, "idle")
-    return false
+    return "failed"
   }
-  if (conversation.generation !== entryGeneration) return abandonEnsure(ctx, conversation)
+  if (conversation.generation !== entryGeneration) return abandon(ctx, conversation)
+  const isStale = () => credentials.epoch !== undefined && provider.credentialEpoch?.() !== credentials.epoch
+  if (isStale()) return "stale"
 
   const startedWith: StartedWith = {
     credentialsFingerprint: credentials.fingerprint,
@@ -61,39 +81,47 @@ async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId:
   }
   const current = conversation.process
   if (current !== undefined && (current.turnActive || sameStartedWith(current.startedWith, startedWith))) {
-    return true
+    return "ready"
   }
 
   const stopped = stopAgent(ctx, conversation)
   const stopGeneration = conversation.generation
   if (stopped !== undefined) await waitForExit(stopped)
-  if (conversation.generation !== stopGeneration) return abandonEnsure(ctx, conversation)
+  if (conversation.generation !== stopGeneration) return abandon(ctx, conversation)
+  if (isStale()) return "stale"
 
   if (!makeRoomForAgent(ctx, conversation)) {
     notify(ctx, conversation, "error", tooManyConversationsNotice)
     setStatus(ctx, conversation, "idle")
-    return false
+    return "failed"
   }
 
   // Set in the same tick as the cap check above, so concurrent starts can't all pass it.
   conversation.starting = true
   try {
-    await startAgent({ ctx, conversation, windowId, session, credentials, startedWith })
-    return true
+    await startAgent({ ctx, conversation, windowId, session, credentials, startedWith, isStale })
+    return "ready"
   } catch (error) {
+    if (error instanceof StaleCredentialsError) return "stale"
     if (error instanceof StartAbortedError || conversation.generation !== stopGeneration) {
-      return abandonEnsure(ctx, conversation)
+      return abandon(ctx, conversation)
     }
     notify(ctx, conversation, "error", `Couldn't start the local agent: ${errorMessage(error)}`)
     setStatus(ctx, conversation, "idle")
-    return false
+    return "failed"
   } finally {
     conversation.starting = false
+    conversation.startingChild = undefined
   }
 }
 
-function abandonEnsure(ctx: Context, conversation: Conversation): false {
+function abandon(ctx: Context, conversation: Conversation): "abandoned" {
   setStatus(ctx, conversation, "idle")
+  return "abandoned"
+}
+
+function abandonEnsure(ctx: Context, conversation: Conversation): false {
+  abandon(ctx, conversation)
   return false
 }
 
@@ -104,17 +132,21 @@ interface StartAgentArgs {
   session: Session
   credentials: AgentCredentials
   startedWith: StartedWith
+  // True once the credentials were replaced or removed since they were read.
+  isStale: () => boolean
 }
 
 // Spawns the ACP child, does the handshake, then resumes the stored session (or starts a new one).
 async function startAgent(args: StartAgentArgs): Promise<void> {
-  const { ctx, conversation, windowId, session, credentials, startedWith } = args
+  const { ctx, conversation, windowId, session, credentials, startedWith, isStale } = args
   const provider = providerOf(ctx, conversation)
   const { projectDir } = ctx.config
   const generation = conversation.generation
   const resumeSessionId = conversation.resumeSessionId
 
   const spec = provider.spawnSpec({ projectDir })
+  // Right before the spawn, with nothing awaited in between: the last point to refuse stale credentials.
+  if (isStale()) throw new StaleCredentialsError()
   const child = spawn(spec.command, spec.args, {
     cwd: projectDir,
     stdio: ["pipe", "pipe", "inherit"],
@@ -125,6 +157,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       caseInsensitive: process.platform === "win32",
     }),
   })
+  conversation.startingChild = child
   child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
   child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
   child.on("exit", (code) => {
@@ -169,6 +202,8 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
       clientInfo: { name: "prismic-local-agent", title: "Prismic Local Agent", version: bridgeInfo.version },
     })
+    if (conversation.generation !== generation) throw new StartAbortedError()
+    if (isStale()) throw new StaleCredentialsError()
     if (initialized.agentCapabilities?.mcpCapabilities?.http !== true) {
       throw new Error("The agent does not support HTTP MCP servers")
     }
@@ -214,6 +249,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     agent.preambleSent = resumed
 
     if (conversation.generation !== generation) throw new StartAbortedError()
+    if (isStale()) throw new StaleCredentialsError()
     conversation.process = agent
     if (resumeSessionId !== undefined) {
       conversation.resumeSessionId = agent.sessionId
@@ -222,6 +258,11 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
 
     await applySelectedConfig(conversation, agent)
     if (conversation.process !== agent) throw new StartAbortedError()
+    if (isStale()) {
+      // Already the conversation's agent: take it back before it can be used.
+      conversation.process = undefined
+      throw new StaleCredentialsError()
+    }
     sendAgentState(ctx, conversation, agent)
   } catch (error) {
     child.kill("SIGTERM")

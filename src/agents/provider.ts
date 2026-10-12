@@ -48,6 +48,9 @@ export interface AgentProvider {
   getStatus(): AgentStatus | Promise<AgentStatus>
   // Startup banner lines.
   bannerLines(): string[] | Promise<string[]>
+  // Bumped whenever the credentials may have changed (a key replaced or removed). The machinery compares it with
+  // AgentCredentials.epoch to never start an agent with credentials that changed while it was getting ready.
+  credentialEpoch?(): number
   // Called once with a listener; the provider calls it when its credentials were removed, with the notice to show.
   // The conversations running on that agent are stopped at once (turns cancelled, approvals denied).
   onCredentialsRemoved?(listener: (notice: string) => void): void
@@ -56,6 +59,9 @@ export interface AgentProvider {
 }
 
 export interface AgentCredentials {
+  // The provider's credential epoch as it was BEFORE the credentials were read. If the provider's epoch has moved
+  // by the time an agent is about to be spawned (or has just handshaken), the credentials are stale.
+  epoch?: number
   // Changes whenever the credentials do: a running agent started with another value is restarted.
   fingerprint: string
   // Environment variables carrying the credentials to the child.

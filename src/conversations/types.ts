@@ -55,6 +55,8 @@ export interface Conversation {
   ensuring: Promise<boolean> | undefined
   // True while an agent is being spawned for it: it already counts as a live agent.
   starting: boolean
+  // The child that was spawned for it and is still handshaking: stopping the conversation must kill it too.
+  startingChild: ChildProcess | undefined
   // Monotonic activity tick, to find the least recently active conversation.
   lastActiveAt: number
   // Bumped whenever the agent is stopped so an in-flight start can notice and abort.

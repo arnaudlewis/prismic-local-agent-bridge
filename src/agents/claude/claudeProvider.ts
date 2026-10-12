@@ -51,11 +51,15 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     // new session starts in the mode that asks, whatever they say.
     initialConfig: () => ({ mode: "default" }),
 
+    credentialEpoch: () => vault.credentialEpoch(),
+
     async authenticate() {
+      // Before reading the key, never after: a key that changes in between must read as stale, not as fresh.
+      const epoch = vault.credentialEpoch()
       const found = await vault.get()
       if (found === undefined) throw new AgentAuthError(apiKeyMissingNotice)
       // The fingerprint changes with the key, so a running agent is restarted (and resumed) with a replaced one.
-      return { fingerprint: vault.fingerprint(found.key), env: { ANTHROPIC_API_KEY: found.key } }
+      return { epoch, fingerprint: vault.fingerprint(found.key), env: { ANTHROPIC_API_KEY: found.key } }
     },
 
     spawnSpec() {

@@ -86,6 +86,20 @@ function chunk(text: string): void {
   notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } })
 }
 
+// How the process reacts to SIGTERM: leave at once (like a normal agent), ignore it, or take a while to leave.
+let onSigterm: "exit" | "ignore" | number = "exit"
+
+function startLog(line: string): void {
+  if (process.env.FAKE_AGENT_START_LOG !== undefined) appendFileSync(process.env.FAKE_AGENT_START_LOG, `${line}\n`)
+}
+
+process.on("SIGTERM", () => {
+  startLog("sigterm")
+  if (onSigterm === "ignore") return
+  if (typeof onSigterm === "number") setTimeout(() => process.exit(0), onSigterm)
+  else process.exit(0)
+})
+
 function log(line: string): void {
   if (process.env.FAKE_AGENT_LOG !== undefined) appendFileSync(process.env.FAKE_AGENT_LOG, `${line}\n`)
 }
@@ -93,7 +107,7 @@ function log(line: string): void {
 // Simulates an agent that keeps talking after the bridge stopped it: it ignores SIGTERM, then sends text and a
 // permission request, and logs how the bridge answered. It exits by itself shortly after.
 function misbehave(): void {
-  process.on("SIGTERM", () => {})
+  onSigterm = "ignore"
   setTimeout(() => process.exit(0), 3000).unref()
   setTimeout(() => {
     chunk("late-text")
@@ -118,6 +132,12 @@ function handlePrompt(message: Message): void {
   if (text.startsWith("dump-env-names")) {
     const names = Object.keys(process.env).filter((name) => !name.startsWith("__CF_")).sort()
     chunk(`envnames:${names.join(",")}`)
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
+  // "delay-exit <ms>": from now on SIGTERM takes this long to make the process leave (an old agent that is slow to stop).
+  if (text.startsWith("delay-exit ")) {
+    onSigterm = Number(text.slice("delay-exit ".length))
     respond(message.id, { stopReason: "end_turn" })
     return
   }
@@ -236,12 +256,19 @@ function handlePrompt(message: Message): void {
 for await (const line of createInterface({ input: process.stdin })) {
   const message = JSON.parse(line) as Message
   switch (message.method) {
-    case "initialize":
-      respond(message.id, {
-        protocolVersion: 1,
-        agentCapabilities: { loadSession: true, mcpCapabilities: { http: true } },
-      })
+    case "initialize": {
+      // `start:<last 4 characters of the API key it was given>`: which credentials this process was started with.
+      startLog(`start:${(process.env.ANTHROPIC_API_KEY ?? "").slice(-4)}`)
+      const answer = () =>
+        respond(message.id, {
+          protocolVersion: 1,
+          agentCapabilities: { loadSession: true, mcpCapabilities: { http: true } },
+        })
+      const delay = Number(process.env.FAKE_AGENT_INIT_DELAY_MS ?? 0)
+      if (delay > 0) setTimeout(answer, delay)
+      else answer()
       break
+    }
     case "session/new":
       sessionKind = "new"
       captureWindowHeader(message)
@@ -266,7 +293,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       }
       if (process.env.FAKE_AGENT_SLOW_CONFIG_MS !== undefined) {
         // Answers late and survives SIGTERM, like an agent whose RPC is still in flight when the bridge resets.
-        process.on("SIGTERM", () => {})
+        onSigterm = "ignore"
         setTimeout(() => {
           respond(message.id, { configOptions: configOptions() })
           setTimeout(() => process.exit(0), 200)

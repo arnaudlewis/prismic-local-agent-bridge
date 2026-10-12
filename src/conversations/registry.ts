@@ -36,6 +36,7 @@ export function getConversation(ctx: Context, session: Session): Conversation {
     selectedConfig: {},
     ensuring: undefined,
     starting: false,
+    startingChild: undefined,
     lastActiveAt: 0,
     generation: 0,
     resumeSessionId: stored?.acpSessionId,
@@ -160,7 +161,11 @@ export function sweepDetachedConversations(ctx: Context): void {
 // approvals denied), told why, and its window sees it idle. The next prompt asks for the credentials again.
 export function stopProviderAgents(ctx: Context, agent: AgentId, notice: string): void {
   for (const conversation of ctx.conversations.values()) {
-    if (conversation.agent !== agent || (conversation.process === undefined && !conversation.starting)) continue
+    if (conversation.agent !== agent) continue
+    // Also a conversation that is only getting ready (waiting for its old agent to exit, authenticating, handshaking):
+    // stopping it bumps its generation, which aborts that start.
+    const busy = conversation.process !== undefined || conversation.starting || conversation.ensuring !== undefined
+    if (!busy) continue
     stopAgent(ctx, conversation)
     notify(ctx, conversation, "error", notice)
     setStatus(ctx, conversation, "idle")
