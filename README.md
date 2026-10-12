@@ -2,7 +2,7 @@
 
 Local daemon that lets the Prismic Page Builder (wroom) chat with a local Codex agent over ACP, billed on the user's ChatGPT plan ("Sign in with ChatGPT"). The agent reaches Prismic through the forked Prismic MCP server (`get_editor_context`, `edit_open_document`).
 
-PoC, private. Requires Node >= 22.18 (runs TypeScript natively).
+PoC. Requires Node >= 22.18 (runs TypeScript natively).
 
 ## Run
 
@@ -31,6 +31,28 @@ Environment:
 
 - `PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS` (default `300000`): the ChatGPT access token is refreshed, and the agent restarted, when it has less validity left than this.
 - `PRISMIC_AI_HOME`: data directory (default `~/.prismic-ai`). It holds `pairing.json`, `credentials.json` (mode 600), `host.json`, `codex-home/`, `conversations/` and `secrets/` (see Persistent conversations and Prismic sign-in). `XDG_CONFIG_HOME` is no longer read.
+
+## Desktop app and running under a supervisor
+
+Most people should not run the daemon from a checkout: the **Prismic Agent** macOS app (Apple Silicon) installs it,
+starts it at login, restarts it after a crash and shows its state in the menu bar. Download it from the
+[latest release](https://github.com/arnaudlewis/prismic-local-agent-bridge/releases/latest). How to install and open it
+(the app is not signed with an Apple Developer ID), how it supervises the daemon, and how to release it are in
+[desktop/README.md](desktop/README.md).
+
+What the daemon does so that a supervisor can run it:
+
+- **Agent programs are downloaded on first use.** When `node_modules` has no `@openai/codex-<platform>` or
+  `@anthropic-ai/claude-agent-sdk-<platform>` package (the app ships without them), the first chat with that agent
+  downloads the exact version pinned in `package-lock.json`, checks its sha512 and unpacks it under
+  `<data dir>/runtimes/`. The chat shows a one-time notice. A checkout that has the packages never downloads anything.
+- **Exit code 3** means the port is taken (`EADDRINUSE`). Any other startup failure exits with 1.
+- **It stops cleanly** on SIGINT, SIGTERM, or when the IPC channel of its parent closes (the app stops it by
+  disconnecting). A parent that crashes therefore takes the daemon down with it.
+- **IPC with the parent**, when it was started with one (the app does): the daemon reports the page origins of the
+  connected Page Builders and its account lines, and the parent can ask it to sign out of Prismic or ChatGPT, or to
+  start the ChatGPT sign-in. These messages travel on Node's private channel, never over HTTP, so a web page cannot
+  see or send them. The list is in desktop/README.md.
 
 ## Demo quick start
 
