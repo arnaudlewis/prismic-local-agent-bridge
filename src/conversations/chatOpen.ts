@@ -14,6 +14,9 @@ export async function handleChatOpen(
 ): Promise<void> {
   const conversation = getConversation(ctx, message.session)
   attachWindow(ctx, conversation, windowId)
+  console.info(
+    `[chat_open] agent=${conversation.agent} channel=${windowId} conversation=${conversation.id.slice(0, 8)} turnActive=${conversation.process?.turnActive === true}`,
+  )
   if (Object.keys(conversation.selectedConfig).length === 0 && message.preferredConfig !== undefined) {
     conversation.selectedConfig = withoutProtectedConfig(
       message.preferredConfig,
