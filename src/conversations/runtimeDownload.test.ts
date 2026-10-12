@@ -81,7 +81,8 @@ describe("agent binary download", () => {
     await harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "hello", session })
 
     await vi.waitFor(() => expect(liveAgentText(harness.events)).toContain("prompt:hello"))
-    expect(notices(chatHistory(harness.events) as never)).toEqual([])
+    // Opening the chat again sends the stored transcript: the download notice is live only, so it must not be there.
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
     expect(chatHistory(harness.events).some((event) => event.type === "notice")).toBe(false)
     expect(calls).toHaveLength(1)
   })

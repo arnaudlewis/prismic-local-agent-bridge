@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { createServer } from "node:http"
 import type { Server } from "node:http"
 import { tmpdir } from "node:os"
@@ -145,5 +145,20 @@ describe("agent runtime", () => {
     await createRuntime().ensure()
 
     expect(runtimeEntries().sort()).toEqual(["fake+tool-pkg@1.0.0", "other+pkg@1.0.0"])
+  })
+
+  it("clears the leftovers of a killed download but not the ones another daemon may be writing", async () => {
+    const runtimes = join(dataDir, "runtimes")
+    mkdirSync(runtimes, { recursive: true })
+    const stale = join(runtimes, ".download-fake+tool-pkg-stale.tgz")
+    const fresh = join(runtimes, ".download-fake+tool-pkg-fresh.tgz")
+    writeFileSync(stale, "")
+    writeFileSync(fresh, "")
+    const anHourAgo = new Date(Date.now() - 60 * 60_000)
+    utimesSync(stale, anHourAgo, anHourAgo)
+
+    await createRuntime().ensure()
+
+    expect(runtimeEntries().sort()).toEqual([".download-fake+tool-pkg-fresh.tgz", "fake+tool-pkg@1.0.0"])
   })
 })

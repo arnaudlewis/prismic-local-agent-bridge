@@ -213,7 +213,8 @@ describe("claude provider", () => {
 describe("claude provider with the Claude Code login (demo mode)", () => {
   function createWithLogin() {
     const dataDir = mkdtempSync(join(tmpdir(), "bridge-claude-login-"))
-    const vault = createApiKeyVault({ store: createMemorySecretStore(key), env: () => undefined })
+    // No key anywhere: the mode must work without one, which a vault holding a key would hide.
+    const vault = createApiKeyVault({ store: createMemorySecretStore(undefined), env: () => undefined })
     const provider = createClaudeProvider({ dataDir, vault, userClaudeHome: undefined, useClaudeCodeLogin: true })
     return { dataDir, provider }
   }
@@ -225,7 +226,7 @@ describe("claude provider with the Claude Code login (demo mode)", () => {
     const spec = provider.spawnSpec({ projectDir: "/tmp" })
 
     expect(credentials.env).toEqual({})
-    expect(JSON.stringify(spec)).not.toContain(key)
+    expect(spec.env).not.toHaveProperty("ANTHROPIC_API_KEY")
     expect(spec.args).toHaveLength(1)
     expect(spec.env).toEqual({ NO_BROWSER: "1", DISABLE_AUTOUPDATER: "1" })
     expect(existsSync(join(dataDir, "claude-home"))).toBe(false)

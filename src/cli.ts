@@ -34,6 +34,12 @@ const defaultRefreshMarginMs = 300_000
 // The desktop app (desktop/src/bridgeProcess.ts) reads this exit code.
 const portInUseExitCode = 3
 
+// The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it. The
+// listener is registered before anything is awaited: a disconnect during startup must not leave a daemon nobody
+// supervises.
+let onDisconnect: (() => void) | undefined
+process.once("disconnect", () => (onDisconnect === undefined ? process.exit(0) : onDisconnect()))
+
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
@@ -149,8 +155,7 @@ async function main(): Promise<void> {
   }
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)
-  // The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it.
-  if (process.connected) process.once("disconnect", shutdown)
+  onDisconnect = shutdown
 }
 
 function exitWhenPortInUse(error: unknown, port: number): never {

@@ -113,7 +113,11 @@ function run(): void {
         defaultId: 1,
         cancelId: 1,
       })
-      if (response !== 0) return
+      if (response !== 0) {
+        // Electron already flipped the checkbox when it was clicked: rebuild the menu from the real state.
+        tray?.refresh()
+        return
+      }
     }
     state.update({ claudeCodeLogin: state.get().claudeCodeLogin !== true })
     await bridge.restart()

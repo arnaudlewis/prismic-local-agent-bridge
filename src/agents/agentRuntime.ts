@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { pipeline } from "node:stream/promises"
 import { fileURLToPath } from "node:url"
@@ -32,6 +32,8 @@ export interface CreateAgentRuntimeArgs {
 
 const downloadTimeoutMs = 15 * 60_000
 const completeMarker = ".complete"
+// A download is bounded by downloadTimeoutMs: anything untouched for longer is left over from a killed daemon.
+const staleLeftoverMs = 30 * 60_000
 
 export const daemonRootDir = fileURLToPath(new URL("../../", import.meta.url))
 
@@ -79,11 +81,7 @@ export function createAgentRuntime(args: CreateAgentRuntimeArgs): AgentRuntime {
   async function download(): Promise<void> {
     if (locked === undefined) return
     mkdirSync(runtimesDir, { recursive: true, mode: 0o700 })
-    for (const entry of readdirSync(runtimesDir)) {
-      if (entry.startsWith(downloadPrefix) || entry.startsWith(unpackPrefix)) {
-        rmSync(join(runtimesDir, entry), { recursive: true, force: true })
-      }
-    }
+    removeStaleLeftovers()
 
     const archive = join(runtimesDir, `${downloadPrefix}${randomUUID()}.tgz`)
     const unpackDir = join(runtimesDir, `${unpackPrefix}${randomUUID()}`)
@@ -105,6 +103,20 @@ export function createAgentRuntime(args: CreateAgentRuntimeArgs): AgentRuntime {
       rmSync(unpackDir, { recursive: true, force: true })
     }
     removeOtherVersions()
+  }
+
+  // What a killed download left behind. Entries touched recently may belong to a download in progress in another
+  // daemon on the same data directory, so they stay.
+  function removeStaleLeftovers(): void {
+    for (const entry of readdirSync(runtimesDir)) {
+      if (!entry.startsWith(downloadPrefix) && !entry.startsWith(unpackPrefix)) continue
+      const path = join(runtimesDir, entry)
+      try {
+        if (Date.now() - statSync(path).mtimeMs > staleLeftoverMs) rmSync(path, { recursive: true, force: true })
+      } catch {
+        // Gone in the meantime.
+      }
+    }
   }
 
   function removeOtherVersions(): void {

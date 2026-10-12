@@ -72,6 +72,14 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     child = spawned
     spawned.stdout?.pipe(log, { end: false })
     spawned.stderr?.pipe(log, { end: false })
+    // The log closes once both streams have, not when the process exits: its last output can still be in flight.
+    let openStreams = 2
+    const onStreamClosed = () => {
+      openStreams -= 1
+      if (openStreams === 0) log.end()
+    }
+    spawned.stdout?.on("close", onStreamClosed)
+    spawned.stderr?.on("close", onStreamClosed)
     let editors: string[] = []
     setState({ kind: "starting" })
 
@@ -86,7 +94,6 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       if (handled) return
       handled = true
       clearInterval(healthTimer)
-      log.end()
       child = undefined
       if (stopRequested) return setState({ kind: "stopped" })
       if (code === portInUseExitCode) {
