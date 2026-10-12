@@ -39,7 +39,6 @@ async function main(): Promise<void> {
     auth,
     dataDir,
     userCodexHome,
-    allowFullAccess: options.allowFullAccess,
     projectDir: project.path,
     agentMode: options.agentMode,
     model: options.model,
@@ -65,7 +64,6 @@ async function main(): Promise<void> {
   console.info(`Listening on http://127.0.0.1:${options.port}`)
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
   console.info(`Agent mode: ${options.agentMode}${options.model === undefined ? "" : `, model: ${options.model}`}`)
-  console.info(`Full access: ${options.allowFullAccess ? "allowed" : "disabled"}`)
   console.info(
     userCodexHome === undefined
       ? `Codex home: ${isolatedCodexHomePath(dataDir)} (isolated)`
@@ -89,7 +87,6 @@ interface CliOptions {
   model: string | undefined
   agentMode: AgentMode
   useUserCodex: boolean
-  allowFullAccess: boolean
   refreshMarginMs: number
 }
 
@@ -102,7 +99,6 @@ function parseOptions(): CliOptions {
       model: { type: "string" },
       "agent-mode": { type: "string" },
       "use-user-codex": { type: "boolean" },
-      "allow-full-access": { type: "boolean" },
     },
     strict: true,
   })
@@ -115,11 +111,6 @@ function parseOptions(): CliOptions {
 
   const agentMode = values["agent-mode"] ?? "read-only"
   if (!isAgentMode(agentMode)) throw new Error(`Invalid --agent-mode: ${agentMode} (${agentModes.join(" | ")})`)
-
-  const allowFullAccess = values["allow-full-access"] ?? false
-  if (agentMode === "agent-full-access" && !allowFullAccess) {
-    throw new Error("--agent-mode agent-full-access requires --allow-full-access")
-  }
 
   const rawMargin = process.env.PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS
   const refreshMarginMs = rawMargin === undefined ? defaultRefreshMarginMs : Number(rawMargin)
@@ -134,7 +125,6 @@ function parseOptions(): CliOptions {
     model,
     agentMode,
     useUserCodex: values["use-user-codex"] ?? false,
-    allowFullAccess,
     refreshMarginMs,
   }
 }

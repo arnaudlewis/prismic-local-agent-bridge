@@ -55,8 +55,6 @@ interface CreateAgentSessionsArgs {
   dataDir: string
   // Set with --use-user-codex: run against this existing Codex home instead of an isolated one.
   userCodexHome: string | undefined
-  // Without it, the agent-full-access mode can't be selected from the browser.
-  allowFullAccess: boolean
   // Overrides the codex-acp entry point; only tests pass it.
   agentBin?: string
   // Override the idle TTL and the resource caps; only tests pass them.
@@ -151,7 +149,7 @@ interface AgentExitArgs {
 class StartAbortedError extends Error {}
 
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
-  const { channels, auth, dataDir, userCodexHome, allowFullAccess, agentBin, projectDir, agentMode, model, refreshMarginMs } =
+  const { channels, auth, dataDir, userCodexHome, agentBin, projectDir, agentMode, model, refreshMarginMs } =
     args
   const idleTtlMs = args.idleTtlMs ?? defaultIdleTtlMs
   const liveAgentLimit = args.maxLiveAgents ?? maxLiveAgents
@@ -384,10 +382,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
 
   function sendSessionConfig(conversation: Conversation, agent: AgentFields): void {
     const options = toBridgeConfigOptions(agent.configOptions)
-    sendLive(conversation, {
-      type: "session_config",
-      options: allowFullAccess ? options : options.map(withoutFullAccess),
-    })
+    sendLive(conversation, { type: "session_config", options })
   }
 
   function sendAvailableCommands(conversation: Conversation, agent: AgentFields): void {
@@ -500,11 +495,6 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const agent = conversation?.agent
     if (conversation === undefined || agent === undefined) {
       sendToWindow(windowId, { type: "notice", tone: "info", text: "The local agent isn't running yet." })
-      return
-    }
-    if (!allowFullAccess && isFullAccessRequest(message.configId, message.value)) {
-      notify(conversation, "error", fullAccessDisabledNotice)
-      sendSessionConfig(conversation, agent)
       return
     }
     if (agent.turnActive) {
@@ -1010,19 +1000,6 @@ const hiddenCommands = ["plan"]
 function blockedCommandName(text: string): string | undefined {
   const name = /^\/([A-Za-z][\w-]*)(\s|$)/.exec(text.trim())?.[1]?.toLowerCase()
   return name !== undefined && blockedCommands.includes(name) ? name : undefined
-}
-
-const fullAccessValue = "agent-full-access"
-
-const fullAccessDisabledNotice = "Full access is disabled. Restart the bridge with --allow-full-access to enable it."
-
-function isFullAccessRequest(configId: string, value: string): boolean {
-  return configId === "mode" && value === fullAccessValue
-}
-
-export function withoutFullAccess(option: BridgeConfigOption): BridgeConfigOption {
-  if (option.id !== "mode") return option
-  return { ...option, values: option.values.filter((entry) => entry.value !== fullAccessValue) }
 }
 
 function toBridgeConfigOptions(options: SessionConfigOption[]): BridgeConfigOption[] {

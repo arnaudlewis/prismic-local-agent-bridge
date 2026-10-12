@@ -19,8 +19,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--port` | `7878` | Listening port. |
 | `--origin` | `http://localhost:5173` | Allowed browser origin. Repeatable. |
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
-| `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access` (the last one needs `--allow-full-access`). |
-| `--allow-full-access` | off | Let the browser select the `agent-full-access` mode (see below). |
+| `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access`. |
 | `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 
 Environment:
@@ -64,7 +63,9 @@ Risks of `--use-user-codex`:
 
 The mode (`mode` config option) starts from `--agent-mode` for every new session. A page can't change it when opening the chat: the `mode` key of `preferredConfig` is ignored. Only an explicit `set_config_option` changes it (and it survives agent restarts until `chat_reset`).
 
-The `agent-full-access` mode (unrestricted file and network access) is disabled by default, because a page open in the browser can contain untrusted content. Without `--allow-full-access` the bridge removes that value from the `mode` option in every `session_config`, and answers a `set_config_option` for it with the notice "Full access is disabled. Restart the bridge with --allow-full-access to enable it." The banner shows `Full access: allowed` or `Full access: disabled`.
+The `agent-full-access` mode (unrestricted file and network access, never asks for approval) is offered like any other mode: it is in the `mode` values of `session_config`, `set_config_option` accepts it, and `--agent-mode agent-full-access` is accepted at startup. The browser UI asks the user to confirm before selecting it. `chat_reset` goes back to `--agent-mode`.
+
+Changelog: the `--allow-full-access` flag and the `Full access: allowed|disabled` banner line were removed (Full access is available by default); passing the old flag now fails as an unknown option.
 
 ## Persistent conversations
 
@@ -102,9 +103,9 @@ The first prompt of a conversation is preceded by a preamble that also holds an 
 ## Threat model
 
 - **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization.
-- **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write` and `agent` (auto review) with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
+- **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write`, `agent` (auto review) and `agent-full-access` with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
 - **The default workspace is empty, but it is not a boundary:** without `--project` the agent's working directory is `<data dir>/workspace`, which holds no project files. What the agent can read or write on disk is decided by the sandbox mode, not by the working directory: Codex's `read-only` mode can still read files outside the workspace.
-- **`--allow-full-access`** only gates the `agent-full-access` preset, the only mode that never asks for approval. It does not restrict the other modes.
+- **Full access is available by default** (a deliberate choice, with no CLI gate). It is selectable from the browser UI after its confirmation, it never asks for approvals, and it gives the agent unrestricted file and network access as the local user. Page and document content is untrusted, so a prompt injection can use it. `preferredConfig.mode` is ignored at `chat_open`: the mode only changes through an explicit `set_config_option`.
 - **`--use-user-codex`:** the agent uses your Codex home, config, hooks and MCP servers, and all their tools become reachable from the browser (see "Codex home").
 - **Stored transcripts:** conversations are saved in plain text under `<data dir>/conversations/` (`0600`), so anyone who can read your files can read them. They are never logged, and `chat_reset` deletes them. A conversation is reachable by any paired window that knows its id; ids are random UUIDs.
 - **Blocked commands:** `/logout` is account-global (it would sign out Codex outside the bridge). `/review`, `/review-branch`, `/review-commit` and `/goal` start turns that codex-acp runs outside the bridge's agent mode, sandbox and approval policy. They are removed from the command list and rejected on incoming prompts.

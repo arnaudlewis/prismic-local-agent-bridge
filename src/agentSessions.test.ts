@@ -66,7 +66,6 @@ afterEach(() => {
 })
 
 interface CreateHarnessArgs {
-  allowFullAccess?: boolean
   dataDir?: string
   idleTtlMs?: number
   maxLiveAgents?: number
@@ -93,7 +92,6 @@ function createHarness(args: CreateHarnessArgs = {}): Harness {
     auth: { getAccessToken: () => Promise.resolve({ accessToken: "fake", expiresAt: 9_999_999_999_999 }) } as never,
     dataDir,
     userCodexHome: undefined,
-    allowFullAccess: args.allowFullAccess ?? false,
     agentBin: fakeAgentBin,
     idleTtlMs: args.idleTtlMs,
     maxLiveAgents: args.maxLiveAgents,
@@ -122,13 +120,16 @@ function notices(events: BridgeEvent[]): string[] {
   return events.flatMap((event) => (event.type === "notice" ? [event.text] : []))
 }
 
-const disabledNotice = "Full access is disabled. Restart the bridge with --allow-full-access to enable it."
-
-describe("full access guard", () => {
-  it("hides agent-full-access from session_config and rejects selecting it", async () => {
+describe("full access", () => {
+  it("offers agent-full-access in session_config and accepts selecting it", async () => {
     const harness = createHarness()
     await harness.agents.handleMessage(windowId, { type: "chat_open", session })
-    expect(harness.lastMode()?.values.map((entry) => entry.value)).toEqual(["read-only", "workspace-write", "agent"])
+    expect(harness.lastMode()?.values.map((entry) => entry.value)).toEqual([
+      "read-only",
+      "workspace-write",
+      "agent",
+      "agent-full-access",
+    ])
 
     await harness.agents.handleMessage(windowId, {
       type: "set_config_option",
@@ -136,8 +137,8 @@ describe("full access guard", () => {
       value: "agent-full-access",
     })
 
-    expect(notices(harness.events)).toContain(disabledNotice)
-    expect(harness.lastMode()?.currentValue).toBe("read-only")
+    expect(notices(harness.events)).toEqual([])
+    expect(harness.lastMode()?.currentValue).toBe("agent-full-access")
   })
 
   it("still allows other modes", async () => {
@@ -149,25 +150,25 @@ describe("full access guard", () => {
     expect(harness.lastMode()?.currentValue).toBe("agent")
   })
 
-  it("offers and accepts agent-full-access when allowed", async () => {
-    const harness = createHarness({ allowFullAccess: true })
+  it("resets the mode on chat_reset, including full access", async () => {
+    const harness = createHarness()
     await harness.agents.handleMessage(windowId, { type: "chat_open", session })
-    expect(harness.lastMode()?.values.map((entry) => entry.value)).toContain("agent-full-access")
-
     await harness.agents.handleMessage(windowId, {
       type: "set_config_option",
       configId: "mode",
       value: "agent-full-access",
     })
 
-    expect(notices(harness.events)).toEqual([])
-    expect(harness.lastMode()?.currentValue).toBe("agent-full-access")
+    await harness.agents.handleMessage(windowId, { type: "chat_reset" })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+
+    expect(harness.lastMode()?.currentValue).toBe("read-only")
   })
 })
 
 describe("preferredConfig", () => {
-  it.each([false, true])("never changes the mode at chat_open (allowFullAccess: %s)", async (allowFullAccess) => {
-    const harness = createHarness({ allowFullAccess })
+  it("never changes the mode at chat_open", async () => {
+    const harness = createHarness()
     await harness.agents.handleMessage(windowId, {
       type: "chat_open",
       session,
