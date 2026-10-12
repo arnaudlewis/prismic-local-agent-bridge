@@ -7,22 +7,25 @@ import type { SecretStore } from "./secretStore.ts"
 
 const maxSecretFileBytes = 16 * 1024
 
+// `<dataDir>/secrets`, created private. The data directory and the secrets directory under it must be real
+// directories: a symlink in either would let whoever planted it receive the secret.
+export function ensureSecretsDir(dataDir: string): string {
+  const dir = join(dataDir, "secrets")
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  if (lstatSync(dataDir).isSymbolicLink()) throw new SecretStoreUnavailableError("The data directory is a symlink")
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const info = lstatSync(dir)
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new SecretStoreUnavailableError("The secrets path isn't a directory")
+  chmodSync(dir, 0o700)
+  return dir
+}
+
 // The fallback when there is no OS keychain: `<dataDir>/secrets/<name>`, mode 0600 in a 0700 directory, written
 // atomically. A file that isn't a plain regular file (a symlink, a FIFO) is never read or replaced through.
 export function createFileSecretStore(args: { dataDir: string; name: string }): SecretStore {
   const dir = join(args.dataDir, "secrets")
   const path = join(dir, args.name)
-
-  // The data directory and the secrets directory under it must be real directories: a symlink in either would let
-  // whoever planted it receive the key.
-  function ensureDir(): void {
-    mkdirSync(args.dataDir, { recursive: true, mode: 0o700 })
-    if (lstatSync(args.dataDir).isSymbolicLink()) throw new SecretStoreUnavailableError("The data directory is a symlink")
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    const info = lstatSync(dir)
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new SecretStoreUnavailableError("The secrets path isn't a directory")
-    chmodSync(dir, 0o700)
-  }
+  const ensureDir = () => ensureSecretsDir(args.dataDir)
 
   return {
     backend: "file",

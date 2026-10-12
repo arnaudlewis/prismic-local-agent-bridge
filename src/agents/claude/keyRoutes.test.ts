@@ -6,6 +6,7 @@ import { startBridgeServer } from "../../bridgeServer.ts"
 import type { BridgeServer } from "../../bridgeServer.ts"
 import { createPairing } from "../../pairing.ts"
 import { createApiKeyVault } from "../../secrets/apiKeyVault.ts"
+import type { RevocationMarker } from "../../secrets/revocationMarker.ts"
 import { createMemorySecretStore } from "../../testing/memorySecretStore.ts"
 import { createWindowChannels } from "../../windowChannels.ts"
 import { createClaudeProvider } from "./claudeProvider.ts"
@@ -43,12 +44,12 @@ interface Setup {
   logs: unknown[][]
 }
 
-async function setup(args: { stored?: string; env?: string; backend?: "keychain" | "file" } = {}): Promise<Setup> {
+async function setup(args: { stored?: string; env?: string; backend?: "keychain" | "file"; revocation?: RevocationMarker } = {}): Promise<Setup> {
   const port = await freePort()
   const pairing = createPairing({ onCodeChanged: () => {} })
   const token = pairing.tryPair(pairing.currentCode()) ?? ""
   const store = createMemorySecretStore(args.stored, args.backend)
-  const vault = createApiKeyVault({ store, env: () => args.env })
+  const vault = createApiKeyVault({ store, env: () => args.env, revocation: args.revocation })
   const validated: string[] = []
   let validation: KeyValidation = "valid"
   let time = 1_000_000
@@ -420,6 +421,37 @@ async function startSlowPut(s: Setup, body: unknown): Promise<{ finish(): Promis
   }
 }
 
+
+describe("a revocation that can't be recorded", () => {
+  const failing: RevocationMarker = {
+    isSet: () => false,
+    record() {
+      throw new Error("disk full: sk-ant-api03-MUSTNOTAPPEARANYWHERE0000")
+    },
+    clear() {},
+  }
+
+  it("fails the DELETE with a fixed 500, not a silent success, and the key stays", async () => {
+    const s = await setup({ stored: key, revocation: failing })
+
+    const reply = await send(s, "DELETE")
+
+    expect(reply.status).toBe(500)
+    expect(JSON.parse(reply.body)).toEqual({ error: "storage_failed" })
+    expect(s.store.value()).toBe(key)
+    expect(JSON.stringify(s.logs)).not.toContain("MUSTNOTAPPEAR")
+  })
+
+  it("fails the PUT with a fixed 500 and stores nothing", async () => {
+    const s = await setup({ revocation: failing })
+
+    const reply = await send(s, "PUT", { json: { key } })
+
+    expect(reply.status).toBe(500)
+    expect(JSON.parse(reply.body)).toEqual({ error: "storage_failed" })
+    expect(s.store.value()).toBeUndefined()
+  })
+})
 
 describe("credential mutations that overlap", () => {
   const first = "sk-ant-api03-FIRSTFIRSTFIRSTFIRSTFIRST1111"

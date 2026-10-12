@@ -1,6 +1,8 @@
 import { createHmac, randomBytes } from "node:crypto"
 
 import { createFileSecretStore } from "./fileStore.ts"
+import { createRevocationMarker } from "./revocationMarker.ts"
+import type { RevocationMarker } from "./revocationMarker.ts"
 import { createKeychainSecretStore } from "./keychainStore.ts"
 import type { KeychainEntryFactory } from "./keychainStore.ts"
 import { SecretStoreUnavailableError } from "./secretStore.ts"
@@ -52,6 +54,11 @@ interface CreateApiKeyVaultArgs {
   // The keychain can be unavailable on one run and available on the next: a key removed or replaced on one backend
   // must not come back from the other. They are cleaned on every set and remove, and never read from.
   otherStores?: SecretStore[]
+  // Set when a backend that can't be reached now may still hold a copy (the keychain is away, or its cleanup
+  // failed). Every set and remove records it first and fails if it can't: success is never reported without it.
+  revocation?: RevocationMarker
+  // A fixed, non-secret sentence for /status: why a backend is not in use.
+  notice?: string
   // The environment variable that provides a read-only key, as it is when asked.
   env?: () => string | undefined
 }
@@ -59,6 +66,7 @@ interface CreateApiKeyVaultArgs {
 export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
   const { store } = args
   const otherStores = args.otherStores ?? []
+  const { revocation } = args
   let warnedAboutOtherBackend = false
   const readEnv = args.env ?? (() => process.env.ANTHROPIC_API_KEY)
   const salt = randomBytes(32)
@@ -107,6 +115,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     // Before and after: whoever read the key while this runs must not trust what it read.
     credentialEpoch += 1
     seenKeys.add(key)
+    revocation?.record()
     await store.set(key)
     await clearOtherStores()
     credentialEpoch += 1
@@ -114,7 +123,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
 
   // A key that is only in another backend (the keychain came or went since it was stored) is not used: the user adds
   // it again, or deletes it. Says so, once, without the key.
-  async function otherBackendWithKey(): Promise<SecretStore | undefined> {
+  async function otherBackendWithKey(selectedHasKey: boolean): Promise<SecretStore | undefined> {
     for (const other of otherStores) {
       let found: string | undefined
       try {
@@ -125,7 +134,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
       if (found !== undefined) {
         if (!warnedAboutOtherBackend) {
           warnedAboutOtherBackend = true
-          console.warn(otherBackendMessage(other.backend))
+          console.warn(selectedHasKey ? bothBackendsMessage(store.backend) : otherBackendMessage(other.backend))
         }
         return other
       }
@@ -154,6 +163,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
       return exclusive(async () => {
         if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
         try {
+          revocation?.record()
           await store.delete()
           await clearOtherStores()
         } finally {
@@ -164,63 +174,69 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     storage: () => (envKey() === undefined ? store.backend : "env"),
     async status() {
       const found = await get()
+      const other = await otherBackendWithKey(found !== undefined && found.storage !== "env")
       if (found === undefined) {
-        const other = await otherBackendWithKey()
         return {
           configured: false,
           storage: store.backend,
-          ...(other === undefined ? {} : { error: otherBackendMessage(other.backend) }),
+          ...errorField(other === undefined ? args.notice : otherBackendMessage(other.backend)),
         }
       }
-      return { configured: true, keyHint: `…${found.key.slice(-4)}`, storage: found.storage }
+      const both = found.storage !== "env" && other !== undefined
+      return {
+        configured: true,
+        keyHint: `…${found.key.slice(-4)}`,
+        storage: found.storage,
+        ...errorField(both ? bothBackendsMessage(found.storage) : args.notice),
+      }
     },
     fingerprint: (key) => createHmac("sha256", salt).update(key).digest("hex").slice(0, 16),
   }
+}
+
+function errorField(error: string | undefined): { error?: string } {
+  return error === undefined ? {} : { error }
+}
+
+function bothBackendsMessage(used: KeyStorage): string {
+  return `Anthropic API keys are stored in both the keychain and the file; the one in the ${used} is used. Replace or delete the key to clean up the other`
 }
 
 function otherBackendMessage(backend: SecretStore["backend"]): string {
   return `Found an Anthropic API key stored in the ${backend}; add it again from the panel or delete it`
 }
 
-// The keychain when it works, else the private file.
 const keychainCleanupMarker = "keychain-cleanup-pending"
-
-// Stands in for the keychain while it is unavailable: it holds nothing, and "deleting" from it leaves a marker, so
-// that the keychain's own copy (which can't be reached now) is removed the next time the keychain works.
-function createPendingKeychainCleanup(dataDir: string): SecretStore {
-  const marker = createFileSecretStore({ dataDir, name: keychainCleanupMarker })
-  return {
-    backend: "keychain",
-    get: () => Promise.resolve(undefined),
-    set: () => Promise.resolve(),
-    delete: () => marker.set("pending"),
-  }
-}
+const quarantineNotice =
+  "An old Anthropic API key in the OS keychain could not be removed, so the keychain is not used; remove that keychain item or restart the bridge to try again"
 
 // The store in use (the OS keychain when it works, else the private file) and the other one, which only ever gets
 // cleaned (see otherStores). The keychain can come and go between runs: a removal or replacement made while it was
-// away is applied to its copy as soon as it is back.
+// away is recorded, and the keychain is not read again until its copy is really deleted. If that deletion fails the
+// keychain stays out of use (the file is used) and /status says so.
 export async function createDefaultSecretStores(args: {
   dataDir: string
   name: string
   keychainEntry?: KeychainEntryFactory
-}): Promise<{ store: SecretStore; otherStores: SecretStore[] }> {
+}): Promise<{ store: SecretStore; otherStores: SecretStore[]; revocation?: RevocationMarker; notice?: string }> {
   const file = createFileSecretStore({ dataDir: args.dataDir, name: args.name })
+  const marker = createRevocationMarker({ dataDir: args.dataDir, name: keychainCleanupMarker })
+  let keychain: SecretStore
   try {
-    const keychain = await createKeychainSecretStore({ account: args.name, entry: args.keychainEntry })
-    const marker = createFileSecretStore({ dataDir: args.dataDir, name: keychainCleanupMarker })
-    if ((await marker.get()) !== undefined) {
-      try {
-        await keychain.delete()
-        await marker.delete()
-      } catch {
-        console.warn("Could not remove an old copy of the Anthropic API key from the OS keychain")
-      }
-    }
-    return { store: keychain, otherStores: [file] }
+    keychain = await createKeychainSecretStore({ account: args.name, entry: args.keychainEntry })
   } catch (error) {
     if (!(error instanceof SecretStoreUnavailableError)) throw error
     console.warn("No usable OS keychain: the Anthropic API key will be kept in a private file instead")
-    return { store: file, otherStores: [createPendingKeychainCleanup(args.dataDir)] }
+    return { store: file, otherStores: [], revocation: marker }
   }
+  if (marker.isSet()) {
+    try {
+      await keychain.delete()
+      marker.clear()
+    } catch {
+      console.warn("Could not remove an old copy of the Anthropic API key from the OS keychain: it is not used")
+      return { store: file, otherStores: [], revocation: marker, notice: quarantineNotice }
+    }
+  }
+  return { store: keychain, otherStores: [file] }
 }
