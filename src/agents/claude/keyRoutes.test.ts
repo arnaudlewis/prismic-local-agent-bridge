@@ -209,6 +209,25 @@ describe("PUT /auth/claude/key", () => {
     expect(s.validated).toEqual([])
   })
 
+  it.each(["application/jsonp", "application/json-patch+json", "application/vnd.x+json", "text/application/json", "application/json; boundary=x", "application/json, text/plain"])(
+    "refuses %s as the media type",
+    async (contentType) => {
+      const s = await setup()
+
+      expect((await send(s, "PUT", { body: JSON.stringify({ key }), contentType })).status).toBe(415)
+      expect(s.validated).toEqual([])
+    },
+  )
+
+  it.each(["application/json", "Application/JSON", "application/json; charset=utf-8", "application/json;charset=UTF-8", 'application/json; charset="utf-8"'])(
+    "accepts the JSON media type as %s",
+    async (contentType) => {
+      const s = await setup()
+
+      expect((await send(s, "PUT", { body: JSON.stringify({ key }), contentType })).status).toBe(204)
+    },
+  )
+
   it("refuses a body over 4 KiB", async () => {
     const s = await setup()
 

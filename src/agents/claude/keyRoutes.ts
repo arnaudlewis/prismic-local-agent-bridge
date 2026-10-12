@@ -43,7 +43,7 @@ export function createKeyRoutes(args: KeyRoutesArgs): ProviderRoute[] {
       auth: "bearer",
       async handle({ req, res }) {
         checkRate(res)
-        if (!(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        if (!isJsonContentType(req.headers["content-type"])) {
           throw new HttpError(415, "unsupported_media_type")
         }
         const body = KeyBodySchema.safeParse(await readJsonBody(req, maxBodyBytes))
@@ -91,3 +91,7 @@ export function createKeyRoutes(args: KeyRoutesArgs): ProviderRoute[] {
   ]
 }
 
+// The media type is application/json, with at most a charset parameter: not "application/jsonp", not a suffix type.
+function isJsonContentType(header: string | undefined): boolean {
+  return /^application\/json(?:\s*;\s*charset=("?)utf-8\1)?\s*$/i.test(header ?? "")
+}

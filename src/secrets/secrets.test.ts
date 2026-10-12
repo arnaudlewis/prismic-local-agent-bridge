@@ -91,6 +91,35 @@ describe("file secret store", () => {
     expect(lstatSync(join(dataDir, "secrets", "k")).isSymbolicLink()).toBe(true)
   })
 
+  it("refuses a data directory that is a symlink", async () => {
+    const real = tempDir()
+    const link = join(tempDir(), "link")
+    symlinkSync(real, link)
+
+    await expect(createFileSecretStore({ dataDir: link, name: "k" }).set(key)).rejects.toBeInstanceOf(SecretStoreUnavailableError)
+
+    expect(existsSync(join(real, "secrets"))).toBe(false)
+  })
+
+  it("never writes through a file or symlink planted at the temporary path", async () => {
+    const dataDir = tempDir()
+    const store = createFileSecretStore({ dataDir, name: "k" })
+    const victim = join(tempDir(), "victim")
+    writeFileSync(victim, "untouched")
+    await store.set(key)
+    // Whatever was planted next to the secret, a later write leaves it alone and keeps the secret private.
+    for (const name of readdirSync(join(dataDir, "secrets"))) expect(name).toBe("k")
+    for (let index = 0; index < 20; index++) {
+      symlinkSync(victim, join(dataDir, "secrets", `k.${index.toString(16).padStart(16, "0")}.tmp`))
+    }
+
+    await store.set(`${key}2`)
+
+    expect(readFileSync(victim, "utf8")).toBe("untouched")
+    expect(await store.get()).toBe(`${key}2`)
+    expect(statSync(join(dataDir, "secrets", "k")).mode & 0o777).toBe(0o600)
+  })
+
   it("refuses a secrets directory that is a symlink", async () => {
     const dataDir = tempDir()
     symlinkSync(tempDir(), join(dataDir, "secrets"))
