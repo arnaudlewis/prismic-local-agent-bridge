@@ -29,9 +29,10 @@ import {
 import { readEditorContext } from "./editorContextClient.ts"
 import type { ToolIdentity } from "./editorContext.ts"
 import type { AgentMode, BridgeCommand, BridgeConfigOption, BridgeEvent, ClientMessage } from "./protocol.ts"
-import type { HistoryEvent, RecordedBridgeEvent, Session } from "./protocol.ts"
+import type { HistoryEvent, RecordedBridgeEvent, Session, ThreadSummary } from "./protocol.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { singleLine } from "./text.ts"
+import { deriveTitle } from "./threadTitle.ts"
 import { createTranscript } from "./transcript.ts"
 import type { Transcript } from "./transcript.ts"
 import type { WindowChannels } from "./windowChannels.ts"
@@ -132,7 +133,7 @@ interface Conversation {
   // The latest window attached to this conversation: the only one that receives live events.
   windowId: string | undefined
   agent: AgentFields | undefined
-  // Survives agent restarts so the user's model and effort choices persist; only chat_reset clears it.
+  // Survives agent restarts so the user's model and effort choices persist; it belongs to its conversation, so a new conversation starts from the defaults.
   selectedConfig: Record<string, string>
   ensuring: Promise<boolean> | undefined
   // True while an agent is being spawned for it: it already counts as a live agent.
@@ -145,6 +146,12 @@ interface Conversation {
   resumeSessionId: string | undefined
   // The document the preamble pins for this conversation: passed to get_editor_context on every per-turn read.
   pinnedDocumentId: string | undefined
+  // Set once, from the first user message; a conversation without one is never listed.
+  title: string | undefined
+  // Epoch ms of the last user message or finished turn.
+  updatedAt: number
+  // Set by chat_delete: nothing may write this conversation to disk anymore.
+  deleted: boolean
   lastContextNoticeAt: number | undefined
   transcript: Transcript
   // JSON of the last editor_context event, to emit only when the summary changes.
@@ -180,6 +187,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   let activityTick = 0
   const conversations = new Map<string, Conversation>()
   const windowConversations = new Map<string, Conversation>()
+  // The repository a window last worked with: the fallback for answering a chat_delete of an unknown id.
+  const windowRepositories = new Map<string, string>()
   const store = createConversationStore({ dataDir })
 
   try {
@@ -201,6 +210,25 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     touch(conversation)
     record(conversation, event)
     sendLive(conversation, event)
+    if (event.type === "turn_end") {
+      // The thread list shows when a conversation was last active: save now so the index has it.
+      conversation.updatedAt = Date.now()
+      flushSave(conversation)
+      pushThreads(conversation)
+    }
+  }
+
+  function pushThreads(conversation: Conversation): void {
+    if (conversation.windowId === undefined) return
+    try {
+      sendLive(conversation, { type: "threads", threads: threadsOf(conversation.repository) })
+    } catch (error) {
+      console.warn(`Could not list threads: ${errorMessage(error)}`)
+    }
+  }
+
+  function threadsOf(repository: string): ThreadSummary[] {
+    return store.listThreads(repository)
   }
 
   function touch(conversation: Conversation): void {
@@ -250,6 +278,9 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       generation: 0,
       resumeSessionId: stored?.acpSessionId,
       pinnedDocumentId: stored?.pinnedDocumentId,
+      title: stored === undefined ? undefined : storedTitle(stored.title, stored.events),
+      updatedAt: stored?.updatedAt ?? Date.now(),
+      deleted: false,
       lastContextNoticeAt: undefined,
       transcript,
       lastEditorContext: lastEditorContextKey(transcript.events()),
@@ -346,6 +377,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     }
     conversation.windowId = windowId
     windowConversations.set(windowId, conversation)
+    windowRepositories.set(windowId, conversation.repository)
     touch(conversation)
     refreshIdleTimer(conversation)
   }
@@ -354,6 +386,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const conversation = windowConversations.get(windowId)
     if (conversation === undefined) return
     windowConversations.delete(windowId)
+    windowRepositories.delete(windowId)
     if (conversation.windowId === windowId) conversation.windowId = undefined
     refreshIdleTimer(conversation)
   }
@@ -380,7 +413,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function scheduleSave(conversation: Conversation): void {
-    if (conversation.saveTimer !== undefined) return
+    if (conversation.deleted || conversation.saveTimer !== undefined) return
     conversation.saveTimer = setTimeout(() => flushSave(conversation), saveDebounceMs)
     conversation.saveTimer.unref()
   }
@@ -388,6 +421,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   function flushSave(conversation: Conversation): void {
     clearTimeout(conversation.saveTimer)
     conversation.saveTimer = undefined
+    if (conversation.deleted) return
     const events = conversation.transcript.events()
     if (events.length === 0 && conversation.resumeSessionId === undefined) return
     try {
@@ -397,7 +431,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         repository: conversation.repository,
         acpSessionId: conversation.resumeSessionId,
         pinnedDocumentId: conversation.pinnedDocumentId,
-        updatedAt: Date.now(),
+        title: conversation.title,
+        updatedAt: conversation.updatedAt,
         events,
       })
     } catch (error) {
@@ -430,8 +465,10 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         return handleSetConfigOption(windowId, message)
       case "chat_cancel":
         return handleChatCancel(windowId)
-      case "chat_reset":
-        return handleChatReset(windowId)
+      case "threads_list":
+        return handleThreadsList(windowId, message)
+      case "chat_delete":
+        return handleChatDelete(windowId, message)
       case "permission_response":
         return handlePermissionResponse(windowId, message)
     }
@@ -489,6 +526,13 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     if (conversation.pinnedDocumentId === undefined && message.session.document !== undefined) {
       conversation.pinnedDocumentId = message.session.document.id
       scheduleSave(conversation)
+    }
+    conversation.updatedAt = Date.now()
+    if (conversation.title === undefined) {
+      // The thread appears in the list as soon as it has a first message.
+      conversation.title = deriveTitle(message.text)
+      flushSave(conversation)
+      pushThreads(conversation)
     }
     // Set before anything is awaited, so a second prompt can't start while the context is being read.
     const generation = conversation.generation
@@ -633,26 +677,41 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     await agent.connection.cancel({ sessionId: agent.sessionId })
   }
 
-  function handleChatReset(windowId: string) {
-    const conversation = windowConversations.get(windowId)
-    if (conversation === undefined) {
-      sendToWindow(windowId, { type: "chat_status", status: "idle" })
-      return
+  function handleThreadsList(windowId: string, message: Extract<ClientMessage, { type: "threads_list" }>) {
+    windowRepositories.set(windowId, message.repository)
+    sendToWindow(windowId, { type: "threads", threads: threadsOf(message.repository) })
+  }
+
+  // Only conversations the daemon knows (running, or in the index) can be deleted: an unknown id changes nothing.
+  function handleChatDelete(windowId: string, message: Extract<ClientMessage, { type: "chat_delete" }>) {
+    const id = message.conversationId
+    const conversation = conversations.get(id)
+    const indexedRepository = store.threadRepository(id)
+    const repository = conversation?.repository ?? indexedRepository ?? windowRepositories.get(windowId) ?? ""
+    if (conversation !== undefined || indexedRepository !== undefined) deleteConversation(id, conversation)
+    sendToWindow(windowId, { type: "threads", threads: threadsOf(repository) })
+  }
+
+  function deleteConversation(id: string, conversation: Conversation | undefined): void {
+    if (conversation !== undefined) {
+      // First, so that stopping the agent (which cancels its pending permissions) can't write the file again.
+      conversation.deleted = true
+      stopAgent(conversation)
+      clearTimeout(conversation.idleTimer)
+      clearTimeout(conversation.saveTimer)
+      conversation.idleTimer = undefined
+      conversation.saveTimer = undefined
+      if (conversation.windowId !== undefined) {
+        windowConversations.delete(conversation.windowId)
+        conversation.windowId = undefined
+      }
+      conversations.delete(id)
     }
-    stopAgent(conversation)
-    conversation.selectedConfig = {}
-    conversation.resumeSessionId = undefined
-    conversation.pinnedDocumentId = undefined
-    conversation.transcript.clear()
-    conversation.lastEditorContext = undefined
-    clearTimeout(conversation.saveTimer)
-    conversation.saveTimer = undefined
     try {
-      store.remove(conversation.id)
+      store.remove(id)
     } catch (error) {
-      console.warn(`Could not delete conversation ${conversation.id}: ${errorMessage(error)}`)
+      console.warn(`Could not delete conversation ${id}: ${errorMessage(error)}`)
     }
-    setStatus(conversation, "idle")
   }
 
   function handlePermissionResponse(
@@ -1054,6 +1113,13 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   channels.onWindowClosed(detachWindow)
 
   return { handleMessage, detachWindow, stopAll }
+}
+
+// Conversations saved before titles existed get theirs from their first user message.
+function storedTitle(title: string | undefined, events: HistoryEvent[]): string | undefined {
+  if (title !== undefined) return title
+  const first = events.find((event) => event.type === "user_message")
+  return first?.type === "user_message" ? deriveTitle(first.text) : undefined
 }
 
 function leastRecentlyActive(candidates: Conversation[]): Conversation | undefined {

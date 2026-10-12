@@ -43,7 +43,8 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     value: z.string().max(200),
   }),
   z.object({ type: z.literal("chat_cancel") }),
-  z.object({ type: z.literal("chat_reset") }),
+  z.object({ type: z.literal("threads_list"), repository: z.string().min(1).max(200) }),
+  z.object({ type: z.literal("chat_delete"), conversationId: z.string().regex(conversationIdPattern) }),
   z.object({
     type: z.literal("permission_response"),
     requestId: z.string().min(1).max(200),
@@ -126,8 +127,16 @@ export interface BridgeCommand {
   hint?: string
 }
 
+export interface ThreadSummary {
+  conversationId: string
+  title: string
+  // Epoch milliseconds of the last user message or finished turn.
+  updatedAt: number
+}
+
 export type BridgeEvent =
   | { type: "chat_history"; events: HistoryEvent[] }
+  | { type: "threads"; threads: ThreadSummary[] }
   | { type: "chat_status"; status: "idle" | "starting" | "running" }
   | { type: "session_config"; options: BridgeConfigOption[] }
   | { type: "available_commands"; commands: BridgeCommand[] }

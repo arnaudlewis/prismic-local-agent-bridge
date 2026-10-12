@@ -38,7 +38,7 @@ function attach(
 }
 
 describe("createWindowChannels", () => {
-  it("ignores frames from a socket that was replaced, including permission_response and chat_reset", () => {
+  it("ignores frames from a socket that was replaced, including permission_response and threads_list", () => {
     const channels = createWindowChannels()
     const received: ClientMessage[] = []
     channels.onMessage((_windowId, message) => received.push(message))
@@ -46,11 +46,11 @@ describe("createWindowChannels", () => {
     const newSocket = attach(channels)
 
     oldSocket.receive({ type: "permission_response", requestId: "r1", optionId: "allow" })
-    oldSocket.receive({ type: "chat_reset" })
+    oldSocket.receive({ type: "threads_list", repository: "repo" })
     expect(received).toEqual([])
 
-    newSocket.receive({ type: "chat_reset" })
-    expect(received).toEqual([{ type: "chat_reset" }])
+    newSocket.receive({ type: "threads_list", repository: "repo" })
+    expect(received).toEqual([{ type: "threads_list", repository: "repo" }])
   })
 
   it("removes the listeners of the replaced socket", () => {
@@ -104,7 +104,7 @@ describe("createWindowChannels", () => {
     expect(received).toEqual([{ type: "chat_cancel" }])
 
     authorized = false
-    socket.receive({ type: "chat_reset" })
+    socket.receive({ type: "threads_list", repository: "repo" })
     socket.receive({ type: "permission_response", requestId: "r1", optionId: "allow" })
 
     expect(received).toEqual([{ type: "chat_cancel" }])

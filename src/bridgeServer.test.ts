@@ -185,7 +185,7 @@ describe("a socket whose pairing is gone", () => {
     await vi.waitFor(() => expect(received).toHaveLength(1))
 
     time += 31 * day
-    socket.send(JSON.stringify({ type: "chat_reset" }))
+    socket.send(JSON.stringify({ type: "threads_list", repository: "repo" }))
 
     expect(await closed).toBe(4401)
     expect(received).toEqual([{ type: "chat_cancel" }])
@@ -208,7 +208,7 @@ describe("a socket whose pairing is gone", () => {
     time += 1000
     pairToken(pairing)
     expect(pairing.pairedBrowserCount()).toBe(20)
-    socket.send(JSON.stringify({ type: "chat_reset" }))
+    socket.send(JSON.stringify({ type: "threads_list", repository: "repo" }))
 
     expect(await closed).toBe(4401)
     expect(received).toEqual([])

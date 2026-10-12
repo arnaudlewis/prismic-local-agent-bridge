@@ -55,3 +55,30 @@ describe("session.mcpServerUrl", () => {
     ).toBe(false)
   })
 })
+
+describe("thread messages", () => {
+  it("accepts threads_list and chat_delete", () => {
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo" }).success).toBe(true)
+    expect(
+      ClientMessageSchema.safeParse({ type: "chat_delete", conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })
+        .success,
+    ).toBe(true)
+  })
+
+  it.each([
+    { type: "threads_list" },
+    { type: "threads_list", repository: "" },
+    { type: "threads_list", repository: "r".repeat(201) },
+    { type: "chat_delete" },
+    { type: "chat_delete", conversationId: "../../etc/passwd" },
+    { type: "chat_delete", conversationId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" },
+    { type: "chat_delete", conversationId: "aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa" },
+    { type: "chat_delete", conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/../x" },
+  ])("rejects %j", (message) => {
+    expect(ClientMessageSchema.safeParse(message).success).toBe(false)
+  })
+
+  it("no longer knows chat_reset", () => {
+    expect(ClientMessageSchema.safeParse({ type: "chat_reset" }).success).toBe(false)
+  })
+})
