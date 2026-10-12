@@ -61,6 +61,7 @@ let sessionKind = "new"
 let windowHeader = ""
 let heldPromptId: unknown
 let permissionPromptId: unknown
+let toolCounter = 0
 
 function captureWindowHeader(message: Message): void {
   const headers = message.params?.mcpServers?.[0]?.headers ?? []
@@ -104,6 +105,29 @@ function handlePrompt(message: Message): void {
     return
   }
   chunk(`ctx:${sessionKind}:${windowHeader}`)
+  // "emit-tool <server>.<tool> <text>": an MCP tool call shaped like codex-acp's reports. Like codex-acp, the
+  // completed update leaves out the title and rawInput because they are unchanged since the start report.
+  if (text.startsWith("emit-tool ")) {
+    const [, identity = "", ...rest] = text.split(" ")
+    const [server = "", tool = ""] = identity.split(".")
+    const output = rest.join(" ")
+    const toolCallId = `mcp-${toolCounter++}`
+    notify({
+      sessionUpdate: "tool_call",
+      toolCallId,
+      title: `mcp.${server}.${tool}`,
+      status: "in_progress",
+      rawInput: { server, tool, arguments: {} },
+    })
+    notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "completed",
+      rawOutput: { result: { content: [{ type: "text", text: output }], structuredContent: null }, error: null },
+    })
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
   if (text.includes("use-tool")) {
     notify({ sessionUpdate: "tool_call", toolCallId: "tool-1", title: "Run tool", status: "in_progress" })
     notify({ sessionUpdate: "tool_call_update", toolCallId: "tool-1", status: "completed" })

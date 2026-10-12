@@ -44,6 +44,28 @@ const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "fai
 
 export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>
 
+export const EditorContextSummarySchema = z.object({
+  status: z.enum(["no_editor_window", "no_pin", "pinned_matches", "context_changed", "pinned_document_not_open"]),
+  ambiguous: z.boolean(),
+  document: z
+    .object({
+      id: z.string(),
+      title: z.string(),
+      customTypeLabel: z.string().optional(),
+      versionStatus: z.string().optional(),
+      locale: z.string().optional(),
+      readOnly: z.boolean().optional(),
+      hasUnsavedChanges: z.boolean().optional(),
+    })
+    .optional(),
+  slice: z.object({ name: z.string(), variation: z.string().optional() }).optional(),
+  field: z.object({ label: z.string(), type: z.string().optional() }).optional(),
+  detected: z.object({ id: z.string(), title: z.string() }).optional(),
+  pinned: z.object({ id: z.string() }).optional(),
+})
+
+export type EditorContextSummary = z.infer<typeof EditorContextSummarySchema>
+
 export const HistoryEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("user_message"), text: z.string() }),
   z.object({ type: z.literal("agent_message_chunk"), text: z.string(), messageId: z.string().optional() }),
@@ -68,6 +90,7 @@ export const HistoryEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("permission_resolved"), requestId: z.string(), optionId: z.string().optional() }),
   z.object({ type: z.literal("notice"), tone: z.enum(["info", "error"]), text: z.string() }),
   z.object({ type: z.literal("turn_end"), stopReason: z.string() }),
+  z.object({ type: z.literal("editor_context"), toolCallId: z.string(), context: EditorContextSummarySchema }),
 ])
 
 export type HistoryEvent = z.infer<typeof HistoryEventSchema>
@@ -101,6 +124,7 @@ export type BridgeEvent =
       options: Array<{ optionId: string; name: string; kind: string }>
     }
   | { type: "turn_end"; stopReason: string }
+  | { type: "editor_context"; toolCallId: string; context: EditorContextSummary }
   | { type: "notice"; tone: "info" | "error"; text: string }
 
 // The events that are both sent live and recorded in the transcript.
