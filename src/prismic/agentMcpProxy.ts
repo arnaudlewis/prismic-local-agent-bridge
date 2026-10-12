@@ -7,6 +7,7 @@ import { windowIdPattern } from "../protocol.ts"
 import type { WindowChannels } from "../windowChannels.ts"
 import type { McpUpstream } from "./mcpUpstream.ts"
 import { PrismicSignInRequiredError } from "./prismicAuth.ts"
+import type { PrismicAuth } from "./prismicAuth.ts"
 
 // The agents never see a Prismic token. Each agent process is given the URL of this proxy and a random token of its
 // own (a grant); the proxy swaps it for the OAuth access token. So a token refresh never restarts an agent, and the
@@ -16,6 +17,8 @@ export interface AgentMcpGrant {
   mcpOrigin: string
   // The window channel the agent process serves: where its notices go.
   windowKey: string
+  // The Prismic user the agent was started as.
+  userId: string
 }
 
 export interface AgentMcpGrants {
@@ -42,7 +45,7 @@ export function createAgentMcpGrants(): AgentMcpGrants {
     },
     resolve(token) {
       const grant = grants.get(hash(token))
-      return grant === undefined ? undefined : { mcpOrigin: grant.mcpOrigin, windowKey: grant.windowKey }
+      return grant === undefined ? undefined : { mcpOrigin: grant.mcpOrigin, windowKey: grant.windowKey, userId: grant.userId }
     },
     tokens: () => [...grants.values()].map((grant) => grant.token),
   }
@@ -55,11 +58,13 @@ const defaultMaxResponseBytes = 8 * 1024 * 1024
 const defaultTimeoutMs = 120_000
 const noticeThrottleMs = 10_000
 const signInNotice = "Sign in to Prismic again from the agent panel."
+const accountChangedNotice = "The Prismic account changed. Send a message to restart the agent."
 const forwardedHeaders = ["content-type", "accept", "mcp-protocol-version", "mcp-session-id"]
 
 interface AgentMcpRoutesArgs {
   grants: AgentMcpGrants
   upstream: McpUpstream
+  prismicAuth: PrismicAuth
   channels: WindowChannels
   now?: () => number
   // Only tests change these.
@@ -68,16 +73,16 @@ interface AgentMcpRoutesArgs {
 }
 
 export function agentMcpRoutes(args: AgentMcpRoutesArgs): ProviderRoute[] {
-  const { grants, upstream, channels, now = Date.now } = args
+  const { grants, upstream, channels, prismicAuth, now = Date.now } = args
   const timeoutMs = args.timeoutMs ?? defaultTimeoutMs
   const maxResponseBytes = args.maxResponseBytes ?? defaultMaxResponseBytes
   const lastNoticeAt = new Map<string, number>()
 
-  function notifySignInRequired(windowKey: string): void {
+  function notify(windowKey: string, text: string): void {
     const last = lastNoticeAt.get(windowKey)
     if (last !== undefined && now() - last < noticeThrottleMs) return
     lastNoticeAt.set(windowKey, now())
-    channels.send(windowKey, { type: "notice", tone: "error", text: signInNotice })
+    channels.send(windowKey, { type: "notice", tone: "error", text })
   }
 
   function upstreamHeaders(req: IncomingMessage): Record<string, string> {
@@ -98,6 +103,12 @@ export function agentMcpRoutes(args: AgentMcpRoutesArgs): ProviderRoute[] {
     const token = getBearerToken(req)
     const grant = token === undefined ? undefined : grants.resolve(token)
     if (grant === undefined) throw new HttpError(401, "unauthorized")
+    // The grant was issued for the account the agent started as: it never acts as another one.
+    const account = prismicAuth.status(grant.mcpOrigin)
+    if (account.status === "signed_in" && account.userId !== grant.userId) {
+      notify(grant.windowKey, accountChangedNotice)
+      throw new HttpError(502, "prismic_account_changed")
+    }
 
     const body = await readRawBody(req, maxRequestBytes)
     const controller = new AbortController()
@@ -116,7 +127,7 @@ export function agentMcpRoutes(args: AgentMcpRoutesArgs): ProviderRoute[] {
         })
       } catch (error) {
         if (error instanceof PrismicSignInRequiredError) {
-          notifySignInRequired(grant.windowKey)
+          notify(grant.windowKey, signInNotice)
           throw new HttpError(502, "prismic_sign_in_required")
         }
         throw new HttpError(502, "upstream_unavailable")

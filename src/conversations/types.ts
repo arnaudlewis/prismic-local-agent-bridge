@@ -60,6 +60,8 @@ export interface Conversation {
   starting: boolean
   // The child that was spawned for it and is still handshaking: stopping the conversation must kill it too.
   startingChild: ChildProcess | undefined
+  // Its MCP proxy token: revoked with the child, not left to the child's exit.
+  startingGrant: string | undefined
   // Monotonic activity tick, to find the least recently active conversation.
   lastActiveAt: number
   // Bumped whenever the agent is stopped so an in-flight start can notice and abort.

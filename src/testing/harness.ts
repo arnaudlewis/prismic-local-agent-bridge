@@ -42,6 +42,7 @@ afterEach(() => {
 // inherit the daemon's whole environment.
 export const fakeAgentEnvNames = [
   "FAKE_AGENT_COMMANDS",
+  "FAKE_AGENT_EXIT_ON_NEW_SESSION",
   "FAKE_AGENT_FAIL_LOAD",
   "FAKE_AGENT_INHERITED",
   "FAKE_AGENT_INIT_DELAY_MS",
@@ -49,6 +50,7 @@ export const fakeAgentEnvNames = [
   "FAKE_AGENT_LOG",
   "FAKE_AGENT_MCP_LOG",
   "FAKE_AGENT_MODE_VALUES",
+  "FAKE_AGENT_NEW_SESSION_DELAY_MS",
   "FAKE_AGENT_SECRET",
   "FAKE_AGENT_SLOW_CONFIG_MS",
   "FAKE_AGENT_START_LOG",

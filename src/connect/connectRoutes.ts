@@ -201,6 +201,7 @@ export function connectRoutes(args: ConnectRoutesArgs): ProviderRoute[] {
       path: "/connect",
       auth: "none",
       originExempt: true,
+      noCors: true,
       handle: ({ url, res }) => showConnect(url, res),
     },
     {
@@ -208,6 +209,7 @@ export function connectRoutes(args: ConnectRoutesArgs): ProviderRoute[] {
       path: "/connect/decision",
       auth: "none",
       originExempt: true,
+      noCors: true,
       handle: ({ req, res }) => decide(req, res),
     },
     {
@@ -215,6 +217,7 @@ export function connectRoutes(args: ConnectRoutesArgs): ProviderRoute[] {
       path: "/oauth/prismic/callback",
       auth: "none",
       originExempt: true,
+      noCors: true,
       handle: ({ url, res }) => oauthCallback(url, res),
     },
     {

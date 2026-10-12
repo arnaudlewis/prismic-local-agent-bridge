@@ -54,8 +54,9 @@ export function createMcpUpstream(args: { auth: PrismicAuth }): McpUpstream {
       const second = await attempt(request, refreshed)
       if (second.status !== 401) return second
       await second.body?.cancel().catch(() => {})
-      await auth.signOut(request.mcpOrigin)
-      throw new PrismicSignInRequiredError()
+      // Only the sign-in that was refused ends: if another one took its place meanwhile, this request lost a race.
+      if (await auth.signOutIfRejected(request.mcpOrigin, refreshed)) throw new PrismicSignInRequiredError()
+      throw new PrismicUnavailableError()
     },
   }
 }

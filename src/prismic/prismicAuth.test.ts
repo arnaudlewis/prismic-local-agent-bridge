@@ -6,6 +6,7 @@ import type { SecretStore } from "../secrets/secretStore.ts"
 import { createMemorySecretStore } from "../testing/memorySecretStore.ts"
 import { startOAuthStub } from "../testing/oauthStub.ts"
 import type { OAuthStub } from "../testing/oauthStub.ts"
+import { createMcpUpstream } from "./mcpUpstream.ts"
 import { OAuthHttpError, createOAuthClient } from "./oauthClient.ts"
 import type { OAuthClient } from "./oauthClient.ts"
 import { PrismicSignInRequiredError, PrismicUnavailableError, createPrismicAuth } from "./prismicAuth.ts"
@@ -408,18 +409,7 @@ describe("signOut", () => {
   })
 
   it("wins over a refresh that is still in flight: the tokens it brings are not stored", async () => {
-    const real = createOAuthClient()
-    let release: () => void = () => {}
-    const gate = new Promise<void>((resolve) => (release = resolve))
-    // The server answers the refresh; the answer reaches the daemon only once the user has signed out.
-    const oauth: OAuthClient = {
-      ...real,
-      async refresh(args) {
-        const tokens = await real.refresh(args)
-        await gate
-        return tokens
-      },
-    }
+    const { oauth, release, held } = holdingOAuth({ hold: "refresh" })
     const store = createMemorySecretStore()
     const auth = await newAuth({ store, oauth })
     await signIn(auth)
@@ -429,7 +419,7 @@ describe("signOut", () => {
       () => undefined,
       (error: unknown) => error,
     )
-    await vi.waitFor(() => expect(refreshGrants()).toBe(1))
+    await vi.waitFor(() => expect(held()).toBe(1))
     await auth.signOut(stub.origin)
     release()
 
@@ -438,5 +428,221 @@ describe("signOut", () => {
     await expect(auth.accessToken(stub.origin)).rejects.toBeInstanceOf(PrismicSignInRequiredError)
     expect(storedServer(store)?.accessToken).toBeUndefined()
     expect(storedServer(store)?.refreshToken).toBeUndefined()
+  })
+})
+
+// A client whose answers reach the daemon only when the test lets them: the server has answered, the answer is on the way.
+function holdingOAuth(args: { hold: "register" | "exchangeCode" | "refresh"; times?: number }): { oauth: OAuthClient; release(): void; held(): number } {
+  const real = createOAuthClient()
+  let remaining = args.times ?? 1
+  let held = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  async function hold<T>(call: () => Promise<T>): Promise<T> {
+    const result = await call()
+    if (remaining <= 0) return result
+    remaining -= 1
+    held += 1
+    await gate
+    return result
+  }
+  const oauth: OAuthClient = {
+    ...real,
+    register: (callArgs) => (args.hold === "register" ? hold(() => real.register(callArgs)) : real.register(callArgs)),
+    exchangeCode: (callArgs) => (args.hold === "exchangeCode" ? hold(() => real.exchangeCode(callArgs)) : real.exchangeCode(callArgs)),
+    refresh: (callArgs) => (args.hold === "refresh" ? hold(() => real.refresh(callArgs)) : real.refresh(callArgs)),
+  }
+  return { oauth, release: () => release(), held: () => held }
+}
+
+describe("a sign-out voids what was started before it", () => {
+  it("refuses the callback of an authorization begun before the sign-out", async () => {
+    const store = createMemorySecretStore()
+    const auth = await newAuth({ store })
+    const { callback, events } = await startSignIn(auth)
+
+    await auth.signOut(stub.origin)
+
+    // Whoever waits for the sign-in (the connect popup) is told it is over, once.
+    expect(events).toEqual(["failed:canceled"])
+    // The user gets back from the sign-in page: no tokens are issued for it, and nobody is told twice.
+    expect(await auth.handleCallback(callback)).toBe("unknown_state")
+    expect(events).toEqual(["failed:canceled"])
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+    expect(stub.requestsTo("/token")).toHaveLength(0)
+    expect(storedServer(store)?.accessToken).toBeUndefined()
+  })
+
+  it("does not sign in a code that was being exchanged during the sign-out, and reports the failure", async () => {
+    const { oauth, release, held } = holdingOAuth({ hold: "exchangeCode" })
+    const store = createMemorySecretStore()
+    const auth = await newAuth({ store, oauth })
+    const { callback, events } = await startSignIn(auth)
+
+    const callbackResult = auth.handleCallback(callback)
+    await vi.waitFor(() => expect(held()).toBe(1))
+    await auth.signOut(stub.origin)
+    release()
+
+    expect(await callbackResult).toBe("failed")
+    expect(events).toEqual(["failed:failed"])
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+    await expect(auth.accessToken(stub.origin)).rejects.toBeInstanceOf(PrismicSignInRequiredError)
+    expect(storedServer(store)?.accessToken).toBeUndefined()
+  })
+
+  it("rejects a beginSignIn that was still registering the client during the sign-out", async () => {
+    const { oauth, release, held } = holdingOAuth({ hold: "register" })
+    const auth = await newAuth({ oauth })
+
+    const beginning = auth
+      .beginSignIn({ mcpOrigin: stub.origin, onSignedIn: () => {}, onFailed: () => {} })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+    await vi.waitFor(() => expect(held()).toBe(1))
+    await auth.signOut(stub.origin)
+    release()
+
+    expect(await beginning).toBeInstanceOf(PrismicSignInRequiredError)
+  })
+})
+
+describe("a refresh belongs to the session that started it", () => {
+  it("is not joined by callers of a later session, and its late answer changes nothing", async () => {
+    const { oauth, release, held } = holdingOAuth({ hold: "refresh" })
+    const store = createMemorySecretStore()
+    const auth = await newAuth({ store, oauth })
+    await signIn(auth)
+    const firstSessionToken = await auth.accessToken(stub.origin)
+
+    const oldRefresh = auth.refreshAfterUnauthorized(stub.origin, firstSessionToken).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() => expect(held()).toBe(1))
+    await auth.signOut(stub.origin)
+    await signIn(auth)
+    const secondSessionToken = await auth.accessToken(stub.origin)
+    expect(secondSessionToken).not.toBe(firstSessionToken)
+
+    // The old refresh is still waiting; the new session refreshes on its own and is not made to wait for it.
+    const newRefresh = await auth.refreshAfterUnauthorized(stub.origin, secondSessionToken)
+    expect(refreshGrants()).toBe(2)
+    expect(newRefresh).not.toBe(secondSessionToken)
+
+    release()
+    expect(await oldRefresh).toBeInstanceOf(PrismicSignInRequiredError)
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_in", userId: "user-1" })
+    await expect(auth.accessToken(stub.origin)).resolves.toBe(newRefresh)
+    expect(storedServer(store)?.accessToken).toBe(newRefresh)
+  })
+
+  it("is superseded by a sign-in that completes while it is in flight", async () => {
+    const { oauth, release, held } = holdingOAuth({ hold: "refresh" })
+    const store = createMemorySecretStore()
+    const auth = await newAuth({ store, oauth })
+    await signIn(auth)
+    const firstToken = await auth.accessToken(stub.origin)
+
+    const oldRefresh = auth.refreshAfterUnauthorized(stub.origin, firstToken).then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    await vi.waitFor(() => expect(held()).toBe(1))
+    await signIn(auth)
+    const signedInToken = await auth.accessToken(stub.origin)
+    expect(signedInToken).not.toBe(firstToken)
+    const signedInRefreshToken = storedRefreshToken(store)
+
+    release()
+    expect(await oldRefresh).toBeInstanceOf(PrismicSignInRequiredError)
+
+    await expect(auth.accessToken(stub.origin)).resolves.toBe(signedInToken)
+    expect(storedServer(store)?.accessToken).toBe(signedInToken)
+    expect(storedRefreshToken(store)).toBe(signedInRefreshToken)
+  })
+})
+
+describe("signOutIfRejected", () => {
+  it("signs out when the stored token is the one that was rejected", async () => {
+    const auth = await newAuth()
+    await signIn(auth)
+    const current = await auth.accessToken(stub.origin)
+
+    expect(await auth.signOutIfRejected(stub.origin, current)).toBe(true)
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+    expect(stub.requestsTo("/revoke")).toHaveLength(1)
+  })
+
+  it("leaves a newer sign-in alone", async () => {
+    const auth = await newAuth()
+    await signIn(auth)
+    const older = await auth.accessToken(stub.origin)
+    await signIn(auth)
+    const newer = await auth.accessToken(stub.origin)
+
+    expect(await auth.signOutIfRejected(stub.origin, older)).toBe(false)
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_in", userId: "user-1" })
+    await expect(auth.accessToken(stub.origin)).resolves.toBe(newer)
+    expect(stub.requestsTo("/revoke")).toHaveLength(0)
+  })
+
+  it("does nothing when nobody is signed in", async () => {
+    const auth = await newAuth()
+    expect(await auth.signOutIfRejected(stub.origin, "whatever")).toBe(false)
+  })
+})
+
+describe("the upstream helper when the server refuses even a refreshed token", () => {
+  // The MCP endpoint refuses every token; the OAuth endpoints work.
+  function refuseMcpTokens(onRefused?: (call: number) => Promise<void>): { calls(): number } {
+    const realFetch = globalThis.fetch
+    let calls = 0
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      if (!String(input instanceof Request ? input.url : input).endsWith("/mcp")) return realFetch(input, init)
+      calls += 1
+      await onRefused?.(calls)
+      return new Response('{"error":"unauthorized"}', { status: 401 })
+    })
+    return { calls: () => calls }
+  }
+
+  function sendToolCall(auth: PrismicAuth): Promise<Response> {
+    return createMcpUpstream({ auth }).send({
+      mcpOrigin: stub.origin,
+      path: "/mcp",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: Buffer.from("{}"),
+      signal: new AbortController().signal,
+    })
+  }
+
+  it("signs out, because the account is no longer accepted", async () => {
+    const auth = await newAuth()
+    await signIn(auth)
+    const mcp = refuseMcpTokens()
+
+    await expect(sendToolCall(auth)).rejects.toBeInstanceOf(PrismicSignInRequiredError)
+
+    expect(mcp.calls()).toBe(2)
+    expect(refreshGrants()).toBe(1)
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+  })
+
+  it("keeps a sign-in that replaced the refused one in the meantime, and reports the server as unavailable", async () => {
+    const auth = await newAuth()
+    await signIn(auth)
+    // While the retry is in flight, the user signs in again.
+    refuseMcpTokens(async (call) => {
+      if (call === 2) await signIn(auth)
+    })
+
+    await expect(sendToolCall(auth)).rejects.toBeInstanceOf(PrismicUnavailableError)
+
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_in", userId: "user-1" })
+    await expect(auth.accessToken(stub.origin)).resolves.toMatch(/^access-/)
   })
 })

@@ -127,6 +127,7 @@ async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId
   } finally {
     conversation.starting = false
     conversation.startingChild = undefined
+    conversation.startingGrant = undefined
   }
 }
 
@@ -172,10 +173,15 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     }),
   })
   // The agent reaches the Prismic MCP through the daemon, with a token of its own that is worth nothing elsewhere.
-  const grantToken = ctx.prismic.grants.issue({ mcpOrigin: startedWith.mcpOrigin, windowKey: windowId })
+  const grantToken = ctx.prismic.grants.issue({
+    mcpOrigin: startedWith.mcpOrigin,
+    windowKey: windowId,
+    userId: startedWith.prismicUserId,
+  })
   // Whatever the generation: a process that is gone must not leave a working token behind.
   child.on("exit", () => ctx.prismic.grants.revoke(grantToken))
   conversation.startingChild = child
+  conversation.startingGrant = grantToken
   child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
   child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
   child.on("exit", (code) => {
@@ -285,6 +291,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     sendAgentState(ctx, conversation, agent)
   } catch (error) {
     child.kill("SIGTERM")
+    ctx.prismic.grants.revoke(grantToken)
     throw error
   }
 }

@@ -64,6 +64,8 @@ interface Proxy {
 interface ProxyArgs {
   auth: PrismicAuth
   mcpOrigin: string
+  // The account the agent's grant was issued for.
+  userId?: string
   timeoutMs?: number
   maxResponseBytes?: number
 }
@@ -88,6 +90,7 @@ async function startProxy(args: ProxyArgs): Promise<Proxy> {
     routes: agentMcpRoutes({
       grants,
       upstream: createMcpUpstream({ auth: args.auth }),
+      prismicAuth: args.auth,
       channels,
       now: () => time,
       timeoutMs: args.timeoutMs,
@@ -98,7 +101,7 @@ async function startProxy(args: ProxyArgs): Promise<Proxy> {
     channels,
   })
   closers.push(() => server.close())
-  return { port, grants, grant: grants.issue({ mcpOrigin: args.mcpOrigin, windowKey }), notices, advance: (ms) => void (time += ms) }
+  return { port, grants, grant: grants.issue({ mcpOrigin: args.mcpOrigin, windowKey, userId: args.userId ?? "user-1" }), notices, advance: (ms) => void (time += ms) }
 }
 
 interface Reply {
@@ -139,11 +142,15 @@ function errorOf(reply: Reply): string {
 // What the user's browser does at the authorize URL; the daemon ends up signed in to the stub.
 async function signedInAuth(stub: OAuthStub): Promise<PrismicAuth> {
   const auth = await createPrismicAuth({ dataDir: "/nonexistent", port: 7878, stores: { store: createMemorySecretStore() } })
+  await signIn(auth, stub)
+  return auth
+}
+
+async function signIn(auth: PrismicAuth, stub: OAuthStub): Promise<void> {
   const url = await auth.beginSignIn({ mcpOrigin: stub.origin, onSignedIn: () => {}, onFailed: () => {} })
   const location = new URL((await fetch(url, { redirect: "manual" })).headers.get("location") ?? "")
   const state = location.searchParams.get("state") ?? ""
   expect(await auth.handleCallback({ state, code: location.searchParams.get("code") ?? "" })).toBe("signed_in")
-  return auth
 }
 
 describe("against an OAuth server", () => {
@@ -185,7 +192,7 @@ describe("against an OAuth server", () => {
   })
 
   it("refuses a missing, unknown or revoked grant, without inviting the agent to sign in on its own", async () => {
-    const revoked = proxy.grants.issue({ mcpOrigin: oauthStub.origin, windowKey })
+    const revoked = proxy.grants.issue({ mcpOrigin: oauthStub.origin, windowKey, userId: "user-1" })
     proxy.grants.revoke(revoked)
 
     for (const token of [null, "", "not-a-grant", revoked, await auth.accessToken(oauthStub.origin)]) {
@@ -259,6 +266,50 @@ describe("against an OAuth server", () => {
     proxy.advance(10_000)
     expect((await send(proxy)).status).toBe(502)
     expect(proxy.notices).toHaveLength(2)
+  })
+
+  it("does not let an agent started as one account act as another that signed in since", async () => {
+    await auth.signOut(oauthStub.origin)
+    oauthStub.userId = "user-2"
+    await signIn(auth, oauthStub)
+    const mcpRequestsBefore = oauthStub.requestsTo("/mcp").length
+
+    const reply = await send(proxy)
+
+    expect(reply.status).toBe(502)
+    expect(errorOf(reply)).toBe("prismic_account_changed")
+    expect(oauthStub.requestsTo("/mcp")).toHaveLength(mcpRequestsBefore)
+    expect(proxy.notices).toEqual([
+      { windowKey, event: { type: "notice", tone: "error", text: "The Prismic account changed. Send a message to restart the agent." } },
+    ])
+
+    // An agent started as the new account is served.
+    const restarted = proxy.grants.issue({ mcpOrigin: oauthStub.origin, windowKey, userId: "user-2" })
+    expect((await send(proxy, { token: restarted })).status).toBe(200)
+  })
+
+  it("tells the window about a changed account once per ten seconds", async () => {
+    await auth.signOut(oauthStub.origin)
+    oauthStub.userId = "user-2"
+    await signIn(auth, oauthStub)
+
+    for (let request = 0; request < 3; request += 1) expect(errorOf(await send(proxy))).toBe("prismic_account_changed")
+    expect(proxy.notices).toHaveLength(1)
+
+    proxy.advance(10_000)
+    await send(proxy)
+    expect(proxy.notices).toHaveLength(2)
+  })
+
+  it("asks for a sign-in, not an account change, when the daemon is signed out", async () => {
+    await auth.signOut(oauthStub.origin)
+
+    const reply = await send(proxy)
+
+    expect(errorOf(reply)).toBe("prismic_sign_in_required")
+    expect(proxy.notices.map((notice) => notice.event)).toEqual([
+      { type: "notice", tone: "error", text: "Sign in to Prismic again from the agent panel." },
+    ])
   })
 
   it("answers 502 upstream_unavailable, without a notice, while the server is down", async () => {

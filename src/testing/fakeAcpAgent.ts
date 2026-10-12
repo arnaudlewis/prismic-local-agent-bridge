@@ -317,12 +317,26 @@ for await (const line of createInterface({ input: process.stdin })) {
       else answer()
       break
     }
-    case "session/new":
+    case "session/new": {
       sessionKind = "new"
+      // It has been given its MCP config (and logged it) before it stalls or dies: the handshake never completes.
       captureWindowHeader(message)
-      publishCommands()
-      respond(message.id, { sessionId: "fake-session", configOptions: configOptions() })
+      if (process.env.FAKE_AGENT_EXIT_ON_NEW_SESSION !== undefined) process.exit(1)
+      const answer = () => {
+        publishCommands()
+        respond(message.id, { sessionId: "fake-session", configOptions: configOptions() })
+      }
+      const stall = Number(process.env.FAKE_AGENT_NEW_SESSION_DELAY_MS ?? 0)
+      if (stall > 0) {
+        // Like an agent that ignores SIGTERM while it is busy starting.
+        onSigterm = "ignore"
+        setTimeout(() => {
+          answer()
+          setTimeout(() => process.exit(0), 200)
+        }, stall)
+      } else answer()
       break
+    }
     case "session/load":
       if (process.env.FAKE_AGENT_FAIL_LOAD !== undefined) {
         fail(message.id, "Internal error")

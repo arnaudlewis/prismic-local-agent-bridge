@@ -1,8 +1,26 @@
 import type { PrismicRuntime } from "../conversations/context.ts"
 import { createAgentMcpGrants } from "../prismic/agentMcpProxy.ts"
+import type { AgentMcpGrants } from "../prismic/agentMcpProxy.ts"
 import { createMcpUpstream } from "../prismic/mcpUpstream.ts"
 import { PrismicSignInRequiredError } from "../prismic/prismicAuth.ts"
 import type { PrismicAuth } from "../prismic/prismicAuth.ts"
+
+// The redactor holds back the end of an agent's message while it could be the start of a secret: a random grant token
+// that starts with the message's last letter would make a test's expectation depend on chance. These grants always
+// start with "-" or "_", which no test text ends with.
+function createUnobtrusiveGrants(): AgentMcpGrants {
+  const grants = createAgentMcpGrants()
+  return {
+    ...grants,
+    issue(grant) {
+      for (;;) {
+        const token = grants.issue(grant)
+        if (token.startsWith("-") || token.startsWith("_")) return token
+        grants.revoke(token)
+      }
+    },
+  }
+}
 
 export interface FakePrismic {
   // What the conversation machinery receives: a fake sign-in over the real upstream helper and the real grants.
@@ -33,13 +51,18 @@ export function createFakePrismic(args: { accessToken?: string; userId?: string;
       userId = undefined
       return Promise.resolve()
     },
+    signOutIfRejected(_mcpOrigin, rejectedToken) {
+      if (rejectedToken !== accessToken) return Promise.resolve(false)
+      userId = undefined
+      return Promise.resolve(true)
+    },
     knownTokens: () => [accessToken],
   }
   return {
     runtime: {
       auth,
       upstream: createMcpUpstream({ auth }),
-      grants: createAgentMcpGrants(),
+      grants: createUnobtrusiveGrants(),
       bridgePort: args.bridgePort ?? 7878,
     },
     auth,

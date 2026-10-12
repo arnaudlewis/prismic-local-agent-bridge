@@ -201,7 +201,7 @@ describe("GET /connect", () => {
     expect(header(reply, "content-type")).toBe("text/html; charset=utf-8")
     expect(header(reply, "x-frame-options")).toBe("DENY")
     expect(header(reply, "cross-origin-opener-policy")).toBe("same-origin")
-    expect(header(reply, "referrer-policy")).toBe("no-referrer")
+    expect(header(reply, "referrer-policy")).toBe("same-origin")
     expect(header(reply, "cache-control")).toBe("no-store")
     expect(header(reply, "x-content-type-options")).toBe("nosniff")
     const policy = header(reply, "content-security-policy")
@@ -402,6 +402,8 @@ describe("POST /connect/decision", () => {
     ["the daemon's host on another port", () => ({ Origin: "http://127.0.0.1:1" })],
     ["a cross-site fetch", (port: number) => ({ Origin: `http://127.0.0.1:${port}`, "Sec-Fetch-Site": "cross-site" })],
     ["a same-site fetch", (port: number) => ({ Origin: `http://127.0.0.1:${port}`, "Sec-Fetch-Site": "same-site" })],
+    // What a browser sends with a form served under `Referrer-Policy: no-referrer`: the consent page must not use it.
+    ["an opaque origin (`null`)", () => ({ Origin: "null" })],
   ])("refuses a decision from %s, and the attempt stays undecided", async (_name, headersFor) => {
     const daemon = await startDaemon()
     await signIn(daemon)
@@ -482,6 +484,18 @@ describe("POST /connect/decision", () => {
     expect(late.body).toContain("<h1>Connection canceled</h1>")
     expect(daemon.stub.requests).toEqual([])
     expect((await claim(daemon, secret)).json.status).toBe("denied")
+  })
+
+  it("keeps an approval when a Cancel is posted afterwards, and says so", async () => {
+    const daemon = await startDaemon()
+    await signIn(daemon)
+    const { secret, attemptId } = await awaitingConsent(daemon)
+    await decide(daemon, { attempt: attemptId, decision: "allow" })
+
+    const late = await decide(daemon, { attempt: attemptId, decision: "deny" })
+
+    expect(late.body).toContain("<h1>Connected</h1>")
+    expect((await claim(daemon, secret)).json.status).toBe("approved")
   })
 })
 
@@ -737,5 +751,22 @@ describe("POST /pair/claim", () => {
     expect(header(preflight, "access-control-allow-origin")).toBe(deployedOrigin)
     expect(header(preflight, "access-control-allow-methods")).toContain("POST")
     expect(header(preflight, "access-control-allow-headers")).toContain("Content-Type")
+  })
+})
+
+describe("pages that must not be readable by a web page", () => {
+  it.each([
+    ["the consent page", "GET", (challenge: string) => `/connect?origin=${encodeURIComponent(editorOrigin)}&mcp=MCP&challenge=${challenge}`],
+    ["the sign-in callback", "GET", () => "/oauth/prismic/callback?state=unknown"],
+    ["the consent decision", "POST", () => "/connect/decision"],
+  ])("sends no CORS grant with %s, even to an allowed origin", async (_name, method, pathFor) => {
+    const daemon = await startDaemon()
+    const path = pathFor(newSecret().challenge).replace("MCP", encodeURIComponent(daemon.stub.origin))
+
+    const reply = await send(daemon, method, path, { headers: { Origin: editorOrigin } })
+
+    expect(reply.status).not.toBe(404)
+    expect(reply.headers["access-control-allow-origin"]).toBeUndefined()
+    expect(reply.headers.vary).toBeUndefined()
   })
 })

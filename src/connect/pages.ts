@@ -84,7 +84,9 @@ export function sendPage(res: ServerResponse, status: number, page: string): voi
     "Content-Security-Policy": contentSecurityPolicy,
     "X-Frame-Options": "DENY",
     "Cross-Origin-Opener-Policy": "same-origin",
-    "Referrer-Policy": "no-referrer",
+    // Not no-referrer: browsers then send "Origin: null" with the consent form, which can't be told from a sandboxed
+    // foreign page. same-origin still sends no referrer to the MCP or the identity provider.
+    "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
   })

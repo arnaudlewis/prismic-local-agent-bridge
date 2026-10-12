@@ -102,6 +102,8 @@ export interface ProviderRoute {
   // Browser requests to a route normally need an allowed Origin; sign-in callbacks can't have one, and routes that
   // check the Origin themselves opt out of the general check.
   originExempt?: boolean
+  // The response is a page for a browser to navigate to: it carries no CORS headers, so no other origin can read it.
+  noCors?: boolean
   // `paired` is set on "bearer" routes.
   handle(context: {
     req: IncomingMessage

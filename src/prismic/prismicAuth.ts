@@ -43,6 +43,9 @@ export interface PrismicAuth {
   // PrismicSignInRequiredError.
   refreshAfterUnauthorized(mcpOrigin: string, rejectedToken: string): Promise<string>
   signOut(mcpOrigin: string): Promise<void>
+  // Signs out only when the stored access token is still `rejectedToken` (the server refused it even after a
+  // refresh); resolves false, leaving a newer sign-in alone, otherwise.
+  signOutIfRejected(mcpOrigin: string, rejectedToken: string): Promise<boolean>
   // Every access and refresh token this process has held: for redaction only.
   knownTokens(): string[]
 }
@@ -77,6 +80,8 @@ interface Attempt {
   mcpOrigin: string
   codeVerifier: string
   createdAt: number
+  // The sign-outs of the origin when the authorization began: a later sign-out voids it.
+  signOutCount: number
   onSignedIn: () => void
   onFailed: (reason: "canceled" | "failed") => void
 }
@@ -100,10 +105,12 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
   const redirectUri = `http://127.0.0.1:${port}/oauth/prismic/callback`
   const servers = new Map<string, ServerEntry>()
   const attempts = new Map<string, Attempt>()
-  const refreshing = new Map<string, Promise<string>>()
+  const refreshing = new Map<string, { generation: number; promise: Promise<string> }>()
   const registering = new Map<string, Promise<string>>()
-  // Bumped by signOut so a refresh or a sign-in that finishes afterwards can't store tokens again.
+  // Bumped by signOut and by every completed sign-in, so a refresh that finishes afterwards can't store tokens again.
   const generations = new Map<string, number>()
+  // Bumped by signOut only: an authorization started before it is void.
+  const signOutCounts = new Map<string, number>()
   const seenTokens = new Set<string>()
   let queue: Promise<unknown> = Promise.resolve()
 
@@ -132,6 +139,10 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
 
   function generation(mcpOrigin: string): number {
     return generations.get(mcpOrigin) ?? 0
+  }
+
+  function signOutCount(mcpOrigin: string): number {
+    return signOutCounts.get(mcpOrigin) ?? 0
   }
 
   // Writes the current state, one write at a time: a write never interleaves with another.
@@ -236,8 +247,11 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
     onFailed: (reason: "canceled" | "failed") => void
   }): Promise<string> {
     const { mcpOrigin } = signIn
+    const startedSignOuts = signOutCount(mcpOrigin)
     const metadata = await discover(mcpOrigin)
     const clientId = await ensureRegistration(mcpOrigin, metadata)
+    // Signed out while the registration was awaited: this authorization would outlive that sign-out.
+    if (signOutCount(mcpOrigin) !== startedSignOuts) throw new PrismicSignInRequiredError()
     const state = randomBytes(32).toString("base64url")
     const codeVerifier = randomBytes(32).toString("base64url")
     purgeAttempts()
@@ -250,6 +264,7 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
       mcpOrigin,
       codeVerifier,
       createdAt: now(),
+      signOutCount: startedSignOuts,
       onSignedIn: signIn.onSignedIn,
       onFailed: signIn.onFailed,
     })
@@ -284,7 +299,9 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
 
   async function completeSignIn(attempt: Attempt, code: string): Promise<boolean> {
     const { mcpOrigin } = attempt
-    const startedGeneration = generation(mcpOrigin)
+    // The authorization was started before a sign-out: it no longer counts.
+    const isRevoked = () => signOutCount(mcpOrigin) !== attempt.signOutCount
+    if (isRevoked()) return false
     const clientId = servers.get(mcpOrigin)?.clientId
     if (clientId === undefined) return false
     try {
@@ -298,9 +315,11 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
       })
       rememberTokens({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken })
       const userId = await oauth.whoami({ mcpOrigin, accessToken: tokens.accessToken })
-      if (generation(mcpOrigin) !== startedGeneration) return false
+      if (isRevoked()) return false
       storeTokens(mcpOrigin, tokens, userId)
       update(mcpOrigin, { userId })
+      // A refresh that started on the previous tokens must not overwrite these when it finishes.
+      generations.set(mcpOrigin, generation(mcpOrigin) + 1)
       await persistOrWarn()
       return true
     } catch (error) {
@@ -336,12 +355,15 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
   }
 
   function refreshOnce(mcpOrigin: string): Promise<string> {
-    let refresh = refreshing.get(mcpOrigin)
-    if (refresh === undefined) {
-      refresh = refreshTokens(mcpOrigin, generation(mcpOrigin)).finally(() => refreshing.delete(mcpOrigin))
-      refreshing.set(mcpOrigin, refresh)
-    }
-    return refresh
+    const startedGeneration = generation(mcpOrigin)
+    const current = refreshing.get(mcpOrigin)
+    // A refresh of a session that was ended since (sign-out, new sign-in) can't serve callers of the current one.
+    if (current !== undefined && current.generation === startedGeneration) return current.promise
+    const promise = refreshTokens(mcpOrigin, startedGeneration).finally(() => {
+      if (refreshing.get(mcpOrigin)?.promise === promise) refreshing.delete(mcpOrigin)
+    })
+    refreshing.set(mcpOrigin, { generation: startedGeneration, promise })
+    return promise
   }
 
   async function refreshTokens(mcpOrigin: string, startedGeneration: number): Promise<string> {
@@ -390,7 +412,16 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
   }
 
   async function signOut(mcpOrigin: string): Promise<void> {
+    // Everything started before this point must not sign the daemon back in: authorizations waiting for their callback,
+    // and refreshes still in flight.
+    signOutCounts.set(mcpOrigin, signOutCount(mcpOrigin) + 1)
     generations.set(mcpOrigin, generation(mcpOrigin) + 1)
+    for (const [state, attempt] of attempts) {
+      if (attempt.mcpOrigin !== mcpOrigin) continue
+      attempts.delete(state)
+      // The popup that was waiting for this authorization is told, instead of waiting out its lifetime.
+      attempt.onFailed("canceled")
+    }
     const entry = servers.get(mcpOrigin)
     const refreshToken = entry?.refreshToken
     const clientId = entry?.clientId
@@ -404,6 +435,14 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
     }
   }
 
+  // The server refused `rejectedToken` even after a refresh. Only a sign-in that still holds that token is ended: a
+  // newer one (another sign-in or refresh finished meanwhile) is left alone.
+  async function signOutIfRejected(mcpOrigin: string, rejectedToken: string): Promise<boolean> {
+    if (servers.get(mcpOrigin)?.accessToken !== rejectedToken) return false
+    await signOut(mcpOrigin)
+    return true
+  }
+
   return {
     status,
     beginSignIn,
@@ -411,6 +450,7 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
     accessToken,
     refreshAfterUnauthorized,
     signOut,
+    signOutIfRejected,
     knownTokens: () => [...seenTokens],
   }
 }

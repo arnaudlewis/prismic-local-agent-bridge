@@ -57,7 +57,8 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     if (req.headers.origin !== undefined && allowedOrigin === undefined && customRoute?.originExempt !== true) {
       throw new HttpError(403, "Forbidden origin")
     }
-    applyCors(res, allowedOrigin)
+    // Pages meant to be navigated to (the popup) are never readable by another origin's script.
+    if (customRoute?.noCors !== true) applyCors(res, allowedOrigin)
 
     if (method === "OPTIONS") {
       res.writeHead(204, {

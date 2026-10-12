@@ -37,6 +37,7 @@ export function getConversation(ctx: Context, session: Session): Conversation {
     ensuring: undefined,
     starting: false,
     startingChild: undefined,
+    startingGrant: undefined,
     lastActiveAt: 0,
     generation: 0,
     resumeSessionId: stored?.acpSessionId,

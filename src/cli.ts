@@ -102,7 +102,7 @@ async function main(): Promise<void> {
         projectDir: project.path,
         limiter: createRateLimiter(connectRateLimit),
       }),
-      ...agentMcpRoutes({ grants, upstream, channels }),
+      ...agentMcpRoutes({ grants, upstream, channels, prismicAuth }),
       ...editorContextRoutes({ prismicAuth, upstream }),
     ],
     pairing,

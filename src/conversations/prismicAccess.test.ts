@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { conversationId, createHarness, lastStatus, liveAgentText, notices, session, windowA } from "../testing/harness.ts"
 
@@ -18,6 +18,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.FAKE_AGENT_MCP_LOG
+  delete process.env.FAKE_AGENT_NEW_SESSION_DELAY_MS
+  delete process.env.FAKE_AGENT_EXIT_ON_NEW_SESSION
 })
 
 // One entry per session the fake agent was given: the MCP server it was told to use.
@@ -44,7 +46,7 @@ describe("what an agent is given to reach Prismic", () => {
     const grant = grantOf(given)
     expect(grant).not.toBe("")
     expect(given?.authorization).not.toContain(oauthAccessToken)
-    expect(harness.prismic.runtime.grants.resolve(grant)).toEqual({ mcpOrigin: "http://127.0.0.1:1", windowKey: windowA })
+    expect(harness.prismic.runtime.grants.resolve(grant)).toEqual({ mcpOrigin: "http://127.0.0.1:1", windowKey: windowA, userId: "user-1" })
   })
 
   it("stops working when the agent is stopped", async () => {
@@ -118,5 +120,49 @@ describe("a window the agent cannot be started for", () => {
     expect(notices(harness.events)).toEqual([])
     expect(liveAgentText(harness.events)).toContain("prompt:hello again")
     expect(givenToAgents()).toHaveLength(1)
+  })
+})
+
+describe("an agent that is still starting", () => {
+  // The fake agent has logged its MCP config (so it holds its grant) and then stalls, ignoring SIGTERM.
+  async function openStallingAgent() {
+    process.env.FAKE_AGENT_NEW_SESSION_DELAY_MS = "1500"
+    const harness = createHarness()
+    const opening = harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    await vi.waitFor(() => expect(givenToAgents()).toHaveLength(1))
+    const grant = grantOf(givenToAgents()[0])
+    expect(harness.prismic.runtime.grants.resolve(grant)).toBeDefined()
+    return { harness, grant, opening }
+  }
+
+  it("has its grant revoked at once when the conversation is deleted, even though the process ignores SIGTERM", async () => {
+    const { harness, grant, opening } = await openStallingAgent()
+
+    await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId })
+
+    expect(harness.prismic.runtime.grants.resolve(grant)).toBeUndefined()
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
+    await opening
+  })
+
+  it("has its grant revoked at once when the daemon stops everything", async () => {
+    const { harness, grant, opening } = await openStallingAgent()
+
+    harness.agents.stopAll()
+
+    expect(harness.prismic.runtime.grants.resolve(grant)).toBeUndefined()
+    await opening
+  })
+
+  it("leaves no live grant when the agent dies during the handshake", async () => {
+    process.env.FAKE_AGENT_EXIT_ON_NEW_SESSION = "1"
+    const harness = createHarness()
+
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+
+    expect(givenToAgents()).toHaveLength(1)
+    expect(notices(harness.events)).toHaveLength(1)
+    expect(notices(harness.events)[0]).toContain("Couldn't start the local agent")
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
   })
 })
