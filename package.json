@@ -12,8 +12,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.89.1",
     "@agentclientprotocol/codex-acp": "2.1.1",
     "@agentclientprotocol/sdk": "1.7.0",
+    "@napi-rs/keyring": "2.1.1",
     "jose": "6.2.12",
     "ws": "8.21.0",
     "zod": "4.3.6"

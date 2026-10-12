@@ -3,7 +3,7 @@ import { z } from "zod"
 export const bridgeInfo = { name: "prismic-local-agent-bridge", version: "0.0.0" }
 
 // The agents the daemon can run. Adding one is this line plus an AgentProvider (see src/agents/provider.ts).
-export const agentIds = ["codex"] as const
+export const agentIds = ["codex", "claude"] as const
 
 export const AgentIdSchema = z.enum(agentIds)
 
@@ -167,10 +167,23 @@ export interface ChatGptStatus {
   error?: string
 }
 
-export type AgentAccountStatus = { kind: "chatgpt" } & ChatGptStatus
+// The account an agent is billed on. Codex signs in with ChatGPT; Claude uses an Anthropic API key, which never
+// leaves the daemon: only whether there is one, where it is kept, and its last 4 characters are reported.
+export type AgentAccountStatus =
+  | ({ kind: "chatgpt" } & ChatGptStatus)
+  | {
+      kind: "apiKey"
+      status: "missing" | "configured"
+      // "…abcd": the last 4 characters of the key.
+      keyHint?: string
+      // Where the key is (or would be) kept. "env" means ANTHROPIC_API_KEY on the daemon: read-only for the browser.
+      storage: "keychain" | "file" | "env"
+      error?: string
+    }
 
 export interface AgentStatus {
-  agentMode: string
+  // Not every agent has a daemon-wide mode or model (Claude's are per session).
+  agentMode?: string
   model?: string
   account: AgentAccountStatus
 }
