@@ -36,6 +36,8 @@ export interface CreateAgentSessionsArgs {
   // The per-turn editor context read can be turned off and its timeout shortened; only tests pass these.
   readEditorContext?: boolean
   contextReadTimeoutMs?: number
+  // Daemon environment variables handed to the agents on top of the allowlist (--pass-env).
+  passEnv?: string[]
 }
 
 export interface AgentSessions {
@@ -60,6 +62,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       conversationLimit: args.maxConversations ?? defaultMaxConversations,
       activityLimitMs: args.detachedActivityLimitMs ?? defaultDetachedActivityLimitMs,
       readContextEachTurn: args.readEditorContext ?? true,
+      passEnv: args.passEnv ?? [],
       contextReadTimeoutMs: args.contextReadTimeoutMs,
     },
     conversations: new Map(),

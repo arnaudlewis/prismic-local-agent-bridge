@@ -6,10 +6,11 @@ import type { Client, McpServer, RequestPermissionResponse } from "@agentclientp
 
 import { AgentAuthError } from "../agents/provider.ts"
 import { browserWindowId } from "../channelKey.ts"
-import type { AgentCredentials, AgentSpawnSpec } from "../agents/provider.ts"
+import type { AgentCredentials } from "../agents/provider.ts"
 import { errorMessage } from "../errors.ts"
 import { bridgeInfo } from "../protocol.ts"
 import type { Session } from "../protocol.ts"
+import { buildChildEnvironment } from "./childEnv.ts"
 import { providerOf } from "./context.ts"
 import type { Context } from "./context.ts"
 import { refreshIdleTimer } from "./idle.ts"
@@ -117,7 +118,12 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
   const child = spawn(spec.command, spec.args, {
     cwd: projectDir,
     stdio: ["pipe", "pipe", "inherit"],
-    env: childEnvironment(spec, credentials),
+    env: buildChildEnvironment({
+      source: process.env,
+      provided: [spec.env, credentials.env],
+      passEnv: ctx.config.passEnv,
+      caseInsensitive: process.platform === "win32",
+    }),
   })
   child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
   child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
@@ -221,14 +227,6 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     child.kill("SIGTERM")
     throw error
   }
-}
-
-// The daemon's environment, minus what the provider says the child must not inherit, plus its own variables and
-// the credentials (which only ever travel this way: never on argv).
-function childEnvironment(spec: AgentSpawnSpec, credentials: AgentCredentials): Record<string, string | undefined> {
-  const inherited: Record<string, string | undefined> = { ...process.env }
-  for (const name of spec.removeEnv ?? []) delete inherited[name]
-  return { ...inherited, ...spec.env, ...credentials.env }
 }
 
 function handleAgentExit(ctx: Context, conversation: Conversation, child: ChildProcess, code: number | null): void {

@@ -21,6 +21,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
 | `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access`. |
 | `--forget-pairings` | off | Delete `pairing.json` at startup: every browser must pair again (see Pairing). |
+| `--pass-env NAME` | none | Repeatable. Hand the daemon's environment variable `NAME` (`^[A-Z_][A-Z0-9_]*$`) to the agents, on top of the allowlist (see Agent environment). The names are printed in the banner, never the values. |
 | `--use-user-claude` | off | Run Claude with your real Claude config directory (skills, CLAUDE.md, MCP servers), still billed on the API key only (see Claude). |
 | `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 

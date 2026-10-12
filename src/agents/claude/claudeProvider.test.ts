@@ -98,28 +98,6 @@ describe("claude provider", () => {
       expect(spec.env).not.toHaveProperty("ANTHROPIC_API_KEY")
     })
 
-    it("does not let the daemon's own environment choose the account, the endpoint or the binary", () => {
-      const { provider } = create()
-
-      const removed = provider.spawnSpec({ projectDir: "/tmp" }).removeEnv ?? []
-
-      for (const name of [
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_BEDROCK_BASE_URL",
-        "ANTHROPIC_VERTEX_BASE_URL",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "CLAUDE_CODE_EXECUTABLE",
-        "ANTHROPIC_API_KEY",
-      ]) {
-        expect(removed).toContain(name)
-      }
-    })
-
     it("uses the user's Claude config dir as is with --use-user-claude, and creates no isolated one", () => {
       const userHome = mkdtempSync(join(tmpdir(), "bridge-user-claude-"))
       mkdirSync(join(userHome, "skills"))
@@ -130,7 +108,6 @@ describe("claude provider", () => {
       expect(spec.env.CLAUDE_CONFIG_DIR).toBe(userHome)
       expect(spec.args[1]).toBe("--hide-claude-auth")
       expect(existsSync(join(dataDir, "claude-home"))).toBe(false)
-      expect(spec.removeEnv).toContain("CLAUDE_CODE_OAUTH_TOKEN")
     })
 
     it("overrides the entry point (tests only)", () => {

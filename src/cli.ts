@@ -15,6 +15,7 @@ import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
 import { createApiKeyVault, createDefaultSecretStore } from "./secrets/apiKeyVault.ts"
+import { passEnvNamePattern } from "./conversations/childEnv.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
     }),
   ]
   const channels = createWindowChannels()
-  const agents = createAgentSessions({ channels, dataDir, projectDir: project.path, providers })
+  const agents = createAgentSessions({ channels, dataDir, projectDir: project.path, providers, passEnv: options.passEnv })
   const server = await startBridgeServer({
     port: options.port,
     allowedOrigins: options.origins,
@@ -82,6 +83,7 @@ async function main(): Promise<void> {
   for (const provider of providers) {
     for (const line of await provider.bannerLines()) console.info(line)
   }
+  if (options.passEnv.length > 0) console.info(`Passing to the agents (--pass-env): ${options.passEnv.join(", ")}`)
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
   console.info(`Pairing code: ${pairing.currentCode()}`)
 
@@ -101,6 +103,7 @@ interface CliOptions {
   agentMode: AgentMode
   useUserCodex: boolean
   useUserClaude: boolean
+  passEnv: string[]
   forgetPairings: boolean
   refreshMarginMs: number
 }
@@ -116,6 +119,7 @@ function parseOptions(): CliOptions {
       "use-user-codex": { type: "boolean" },
       "use-user-claude": { type: "boolean" },
       "forget-pairings": { type: "boolean" },
+      "pass-env": { type: "string", multiple: true },
     },
     strict: true,
   })
@@ -135,6 +139,11 @@ function parseOptions(): CliOptions {
     throw new Error(`Invalid PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS: ${rawMargin}`)
   }
 
+  const passEnv = [...new Set(values["pass-env"] ?? [])]
+  for (const name of passEnv) {
+    if (!passEnvNamePattern.test(name)) throw new Error(`Invalid --pass-env name: ${name} (it must match ${passEnvNamePattern.source})`)
+  }
+
   return {
     project: values.project,
     port,
@@ -144,6 +153,7 @@ function parseOptions(): CliOptions {
     useUserCodex: values["use-user-codex"] ?? false,
     useUserClaude: values["use-user-claude"] ?? false,
     forgetPairings: values["forget-pairings"] ?? false,
+    passEnv,
     refreshMarginMs,
   }
 }

@@ -66,8 +66,6 @@ export interface AgentSpawnSpec {
   command: string
   args: string[]
   env: Record<string, string>
-  // Variables of the daemon's own environment the child must NOT inherit (another credential, another endpoint).
-  removeEnv?: string[]
 }
 
 export interface ToolUpdate {

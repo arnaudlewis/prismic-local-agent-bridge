@@ -20,6 +20,8 @@ export interface SessionsConfig {
   conversationLimit: number
   activityLimitMs: number
   readContextEachTurn: boolean
+  // --pass-env: names of daemon variables handed to the agents on top of the allowlist.
+  passEnv: readonly string[]
   // Undefined: the client's default (4 s).
   contextReadTimeoutMs: number | undefined
 }

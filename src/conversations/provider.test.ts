@@ -286,15 +286,11 @@ describe("provider hooks the Claude agent needs", () => {
     expect(refusing.events.some((event) => event.type === "session_config")).toBe(false)
   })
 
-  it("does not pass the variables a provider says the child must not inherit", async () => {
+  it("hands the agent only the allowlisted part of the daemon's environment, what the provider adds, and --pass-env", async () => {
     process.env.FAKE_AGENT_INHERITED = "from-the-daemon"
     process.env.FAKE_AGENT_KEPT = "also-from-the-daemon"
     try {
-      const harness = createHarness({
-        providerOverrides: {
-          spawnSpec: () => ({ command: process.execPath, args: [fakeAgentBin], env: {}, removeEnv: ["FAKE_AGENT_INHERITED"] }),
-        },
-      })
+      const harness = createHarness({ passEnv: ["FAKE_AGENT_KEPT"] })
       await harness.agents.handleMessage(windowId, { type: "chat_open", session })
       harness.events.length = 0
 

@@ -10,22 +10,6 @@ import { identifyToolCall, readToolResult } from "./toolCalls.ts"
 
 export const apiKeyMissingNotice = "Add your Anthropic API key to use Claude."
 
-// The daemon's own environment must not decide which account, endpoint or binary Claude uses: these are never
-// inherited by the agent (the API key it does get comes from the vault, through the credentials).
-const inheritedEnvToDrop = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_BEDROCK_BASE_URL",
-  "ANTHROPIC_VERTEX_BASE_URL",
-  "ANTHROPIC_CUSTOM_HEADERS",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "AWS_BEARER_TOKEN_BEDROCK",
-  "CLAUDE_CODE_EXECUTABLE",
-]
-
 export interface ClaudeProviderArgs {
   dataDir: string
   vault: ApiKeyVault
@@ -81,7 +65,6 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
         // --hide-claude-auth: refuse every session and turn a claude.ai subscription would pay for.
         args: [agentBin ?? resolveClaudeAcpBin(), "--hide-claude-auth"],
         env: { CLAUDE_CONFIG_DIR: configDir, NO_BROWSER: "1", DISABLE_AUTOUPDATER: "1" },
-        removeEnv: inheritedEnvToDrop,
       }
     },
 

@@ -36,6 +36,19 @@ afterEach(() => {
   for (const agents of running.splice(0)) agents.stopAll()
 })
 
+// The environment knobs of the fake agent: handed to it like a user would with --pass-env, since the agents no longer
+// inherit the daemon's whole environment.
+export const fakeAgentEnvNames = [
+  "FAKE_AGENT_COMMANDS",
+  "FAKE_AGENT_FAIL_LOAD",
+  "FAKE_AGENT_INHERITED",
+  "FAKE_AGENT_KEPT",
+  "FAKE_AGENT_LOG",
+  "FAKE_AGENT_MODE_VALUES",
+  "FAKE_AGENT_SECRET",
+  "FAKE_AGENT_SLOW_CONFIG_MS",
+]
+
 export interface CreateHarnessArgs {
   dataDir?: string
   idleTtlMs?: number
@@ -48,6 +61,8 @@ export interface CreateHarnessArgs {
   contextReadTimeoutMs?: number
   // Replaces parts of the Codex provider (blocked commands, notices, ...) to show the machinery goes through it.
   providerOverrides?: Partial<AgentProvider>
+  // Replaces the names handed to the agent on top of the allowlist (the fake agent's own knobs by default).
+  passEnv?: string[]
   // Replaces the provider list altogether (e.g. none).
   providers?: AgentProvider[]
 }
@@ -82,6 +97,7 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
     dataDir,
     projectDir: tmpdir(),
     providers: args.providers ?? [{ ...codex, ...args.providerOverrides }],
+    passEnv: args.passEnv ?? fakeAgentEnvNames,
     idleTtlMs: args.idleTtlMs,
     maxLiveAgents: args.maxLiveAgents,
     maxConversations: args.maxConversations,
