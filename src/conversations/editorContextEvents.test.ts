@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
-import { windowId, conversationId, session, createHarness, notices, windowA, windowB, chatHistory, editorContextEvents, toolText, windowDocument, contextWindow } from "../testing/harness.ts"
+import { conversationId, session, createHarness, notices, windowA, windowB, chatHistory, editorContextEvents, toolText, windowDocument, contextWindow } from "../testing/harness.ts"
 import type { Harness } from "../testing/harness.ts"
 
 describe("structured editor context", () => {

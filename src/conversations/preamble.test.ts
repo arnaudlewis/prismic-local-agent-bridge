@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { buildPreamble } from "../agentSessions.ts"
+import { buildPreamble } from "./preamble.ts"
 import type { Session } from "../protocol.ts"
 import { session } from "../testing/harness.ts"
 

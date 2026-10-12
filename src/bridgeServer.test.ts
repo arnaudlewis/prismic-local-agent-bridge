@@ -1,10 +1,12 @@
 import { mkdtempSync, readFileSync } from "node:fs"
+import { request as httpRequest } from "node:http"
 import { connect, createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import WebSocket from "ws"
 
+import type { AgentProvider } from "./agents/provider.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import type { BridgeServer } from "./bridgeServer.ts"
 import { createPairing } from "./pairing.ts"
@@ -42,11 +44,9 @@ describe("websocket frames", () => {
         port,
         allowedOrigins: [origin],
         projectDir: "/tmp",
-        agentMode: "read-only",
-        model: undefined,
+        providers: [],
         pairing,
         channels,
-        auth: {} as never,
       }),
     )
     const token = pairing.tryPair(pairing.currentCode())
@@ -70,7 +70,11 @@ describe("websocket frames", () => {
 const day = 24 * 60 * 60 * 1000
 const hour = 60 * 60 * 1000
 
-async function startServer(pairing: ReturnType<typeof createPairing>, recheckIntervalMs?: number) {
+async function startServer(
+  pairing: ReturnType<typeof createPairing>,
+  recheckIntervalMs?: number,
+  providers: AgentProvider[] = [],
+) {
   const port = await freePort()
   const channels = createWindowChannels({ recheckIntervalMs })
   const received: ClientMessage[] = []
@@ -80,11 +84,9 @@ async function startServer(pairing: ReturnType<typeof createPairing>, recheckInt
       port,
       allowedOrigins: [origin],
       projectDir: "/tmp",
-      agentMode: "read-only",
-      model: undefined,
+      providers,
       pairing,
       channels,
-      auth: {} as never,
     }),
   )
   return { port, received }
@@ -185,7 +187,7 @@ describe("a socket whose pairing is gone", () => {
     await vi.waitFor(() => expect(received).toHaveLength(1))
 
     time += 31 * day
-    socket.send(JSON.stringify({ type: "threads_list", repository: "repo" }))
+    socket.send(JSON.stringify({ type: "threads_list", repository: "repo", agent: "codex" }))
 
     expect(await closed).toBe(4401)
     expect(received).toEqual([{ type: "chat_cancel" }])
@@ -208,7 +210,7 @@ describe("a socket whose pairing is gone", () => {
     time += 1000
     pairToken(pairing)
     expect(pairing.pairedBrowserCount()).toBe(20)
-    socket.send(JSON.stringify({ type: "threads_list", repository: "repo" }))
+    socket.send(JSON.stringify({ type: "threads_list", repository: "repo", agent: "codex" }))
 
     expect(await closed).toBe(4401)
     expect(received).toEqual([])
@@ -247,5 +249,177 @@ describe("a socket whose pairing is gone", () => {
     time += 31 * day
 
     expect(await closed).toBe(4401)
+  })
+})
+
+function fakeProvider(overrides: Partial<AgentProvider> = {}): AgentProvider {
+  return {
+    id: "codex",
+    label: "Fake",
+    blockedCommands: [],
+    hiddenCommands: [],
+    protectedConfigIds: [],
+    sessionRestartedNotice: "",
+    authenticate: () => Promise.resolve({ fingerprint: "", env: {} }),
+    spawnSpec: () => ({ command: "", args: [], env: {} }),
+    nativeCommandName: () => undefined,
+    identifyToolCall: () => undefined,
+    readToolResult: () => undefined,
+    getStatus: () => ({
+      agentMode: "read-only",
+      model: "gpt-x",
+      account: { kind: "chatgpt", status: "signed_in", email: "me@example.com", planUsage: true },
+    }),
+    bannerLines: () => [],
+    routes: () => [
+      {
+        method: "POST",
+        path: "/auth/fake/start",
+        auth: "bearer",
+        handle: ({ res }) => {
+          res.writeHead(200, { "Content-Type": "application/json" })
+          res.end('{"started":true}')
+        },
+      },
+      {
+        method: "GET",
+        path: "/auth/fake/callback",
+        auth: "none",
+        originExempt: true,
+        handle: ({ res, url }) => {
+          res.writeHead(200, { "Content-Type": "text/plain" })
+          res.end(`state=${url.searchParams.get("state")}`)
+        },
+      },
+    ],
+    ...overrides,
+  }
+}
+
+async function startWithProviders(providers: AgentProvider[]) {
+  const pairing = createPairing({ onCodeChanged: () => {} })
+  const { port } = await startServer(pairing, undefined, providers)
+  return { port, token: pairToken(pairing) }
+}
+
+describe("GET /status", () => {
+  it("answers { projectDir, agents: { codex: { agentMode, model?, account } } } to a paired browser", async () => {
+    const { port, token } = await startWithProviders([fakeProvider()])
+
+    const response = await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      projectDir: "/tmp",
+      agents: {
+        codex: {
+          agentMode: "read-only",
+          model: "gpt-x",
+          account: { kind: "chatgpt", status: "signed_in", email: "me@example.com", planUsage: true },
+        },
+      },
+    })
+  })
+
+  it("has no old top-level agentMode, model or chatgpt", async () => {
+    const { port, token } = await startWithProviders([fakeProvider()])
+
+    const body = (await (await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })).json()) as Record<string, unknown>
+
+    expect(Object.keys(body).sort()).toEqual(["agents", "projectDir"])
+  })
+
+  it("needs a token", async () => {
+    const { port } = await startWithProviders([fakeProvider()])
+
+    expect((await fetch(`http://127.0.0.1:${port}/status`)).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: "Bearer nope" } })).status).toBe(401)
+  })
+
+  it("lists no agent when there is none", async () => {
+    const { port, token } = await startWithProviders([])
+
+    const response = await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })
+
+    expect(await response.json()).toEqual({ projectDir: "/tmp", agents: {} })
+  })
+})
+
+describe("provider routes", () => {
+  it("serves a bearer route only to a paired browser, from an allowed origin", async () => {
+    const { port, token } = await startWithProviders([fakeProvider()])
+    const url = `http://127.0.0.1:${port}/auth/fake/start`
+
+    expect((await fetch(url, { method: "POST" })).status).toBe(401)
+    expect((await fetch(url, { method: "POST", headers: { Origin: "https://evil.example", Authorization: `Bearer ${token}` } })).status).toBe(403)
+    const ok = await fetch(url, { method: "POST", headers: { Origin: origin, Authorization: `Bearer ${token}` } })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toEqual({ started: true })
+  })
+
+  it("serves an origin-exempt route without a token or an allowed origin (sign-in redirects)", async () => {
+    const { port } = await startWithProviders([fakeProvider()])
+
+    const response = await fetch(`http://127.0.0.1:${port}/auth/fake/callback?state=abc`, {
+      headers: { Origin: "https://auth.example" },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe("state=abc")
+  })
+
+  it("still checks the Host header on provider routes", async () => {
+    const { port } = await startWithProviders([fakeProvider()])
+
+    const status = await new Promise<number | undefined>((resolve) => {
+      const request = httpRequest(
+        { host: "127.0.0.1", port, path: "/auth/fake/callback", headers: { Host: "evil.example" } },
+        (response) => {
+          response.resume()
+          resolve(response.statusCode)
+        },
+      )
+      request.end()
+    })
+
+    expect(status).toBe(403)
+  })
+
+  it("answers 404 for a route no provider registered, and for the old per-agent paths without a provider", async () => {
+    const { port, token } = await startWithProviders([])
+
+    for (const path of ["/auth/chatgpt/start", "/auth/chatgpt/sign-out"]) {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(response.status).toBe(404)
+    }
+  })
+
+  it("lets a provider route fail without taking the daemon down", async () => {
+    const { port, token } = await startWithProviders([
+      fakeProvider({
+        routes: () => [
+          {
+            method: "POST",
+            path: "/auth/fake/start",
+            auth: "bearer",
+            handle: () => Promise.reject(new Error("boom")),
+          },
+        ],
+      }),
+    ])
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    const response = await fetch(`http://127.0.0.1:${port}/auth/fake/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ error: "internal_error" })
+    expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200)
+    error.mockRestore()
   })
 })

@@ -1,0 +1,45 @@
+import type { AgentProvider } from "../agents/provider.ts"
+import type { ConversationStore } from "../conversationStore.ts"
+import type { AgentId } from "../protocol.ts"
+import type { WindowChannels } from "../windowChannels.ts"
+import type { Conversation } from "./types.ts"
+
+// A conversation with no window attached and no turn running is stopped (and dropped from memory) after this long.
+export const defaultIdleTtlMs = 6 * 60 * 60 * 1000
+// Each agent is a child process holding credentials: resident ones are bounded daemon-wide.
+export const defaultMaxLiveAgents = 4
+export const defaultMaxConversations = 50
+// A conversation nobody is looking at must not run (or wait for an approval) forever.
+export const defaultDetachedActivityLimitMs = 30 * 60 * 1000
+export const defaultDetachedSweepIntervalMs = 60_000
+
+export interface SessionsConfig {
+  projectDir: string
+  idleTtlMs: number
+  liveAgentLimit: number
+  conversationLimit: number
+  activityLimitMs: number
+  readContextEachTurn: boolean
+  // Undefined: the client's default (4 s).
+  contextReadTimeoutMs: number | undefined
+}
+
+// Everything the conversation modules share. They are plain functions over this: no module keeps state of its own.
+export interface Context {
+  channels: WindowChannels
+  store: ConversationStore
+  providers: ReadonlyMap<AgentId, AgentProvider>
+  config: SessionsConfig
+  conversations: Map<string, Conversation>
+  windowConversations: Map<string, Conversation>
+  // The repository and agent a window last worked with: the fallback for answering a chat_delete of an unknown id.
+  windowScopes: Map<string, { repository: string; agent: AgentId }>
+  // Monotonic counter behind Conversation.lastActiveAt.
+  activity: { tick: number }
+}
+
+export function providerOf(ctx: Context, conversation: Conversation): AgentProvider {
+  const provider = ctx.providers.get(conversation.agent)
+  if (provider === undefined) throw new Error(`The ${conversation.agent} agent isn't available`)
+  return provider
+}

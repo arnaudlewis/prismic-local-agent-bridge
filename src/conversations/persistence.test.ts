@@ -275,7 +275,7 @@ describe("persistent conversations", () => {
 })
 
 describe("conversationId validation", () => {
-  const base = { mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
+  const base = { agent: "codex", mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
 
   it.each([
     "../../etc/passwd",
@@ -306,7 +306,7 @@ describe("conversationId validation", () => {
 })
 
 describe("input bounds", () => {
-  const base = { conversationId, mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
+  const base = { agent: "codex", conversationId, mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
 
   it.each([
     ["repository", { ...base, repository: "r".repeat(201) }],

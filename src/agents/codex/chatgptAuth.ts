@@ -6,11 +6,10 @@ import { z } from "zod"
 
 import { errorMessage } from "../../errors.ts"
 import type { ChatGptStatus } from "../../protocol.ts"
-import { CredentialsSchema, hasPlanUsageScope, loadCredentials, loadHostId } from "./credentialsFile.ts"
+import { hasPlanUsageScope, loadCredentials, loadHostId } from "./credentialsFile.ts"
 import type { Credentials } from "./credentialsFile.ts"
 import {
   attemptTtlMs,
-  authorizationEndpoint,
   buildAuthorizationUrl,
   classifyRefreshFailure,
   issuer,

@@ -1,44 +1,8 @@
 import { describe, expect, it } from "vitest"
 
-import { isSlashCommand, parseSlashCommand, toBridgeCommand } from "../agentSessions.ts"
+import { toBridgeCommand } from "./commands.ts"
 import type { BridgeEvent } from "../protocol.ts"
 import { windowId, session, createHarness, notices } from "../testing/harness.ts"
-
-describe("isSlashCommand", () => {
-  it.each([
-    "/status",
-    "  /review check the diff",
-    "/review-branch main",
-    "/compact\n",
-    "/ status",
-    "/\u00a0status",
-    "\u00a0/status",
-    "// ",
-    "/etc/hosts",
-  ])("detects %j like codex-acp does", (text) => {
-    expect(isSlashCommand(text)).toBe(true)
-  })
-
-  it.each(["status", "what does /status do", "/$skill", "/ $skill", "/", "/  ", "/\n", " ", ""])(
-    "ignores %j",
-    (text) => {
-      expect(isSlashCommand(text)).toBe(false)
-    },
-  )
-
-  it.each([
-    ["/logout", "logout"],
-    ["/ logout", "logout"],
-    ["/\tGOAL now", "goal"],
-    ["/\u00a0review", "review"],
-    ["\ufeff/Logout", "logout"],
-    ["/\u2028goal", "goal"],
-    ["//logout", "/logout"],
-    ["/a b c", "a"],
-  ])("parses %j as command %j", (text, name) => {
-    expect(parseSlashCommand(text)).toBe(name)
-  })
-})
 
 describe("toBridgeCommand", () => {
   it("keeps the hint of unstructured input", () => {

@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream"
 import { WebSocketServer } from "ws"
 import { z } from "zod"
 
-import type { ChatGptAuth } from "./agents/codex/chatgptAuth.ts"
+import type { AgentProvider } from "./agents/provider.ts"
 import {
   HttpError,
   applyCors,
@@ -12,12 +12,11 @@ import {
   getBearerToken,
   isAllowedHost,
   readJsonBody,
-  sendHtml,
   sendJson,
 } from "./httpUtils.ts"
 import type { Pairing } from "./pairing.ts"
 import { bridgeInfo, windowIdPattern } from "./protocol.ts"
-import type { AgentMode, StatusResponse } from "./protocol.ts"
+import type { StatusResponse } from "./protocol.ts"
 import type { WindowChannels } from "./windowChannels.ts"
 
 const windowPathPattern = new RegExp(`^/windows/(${windowIdPattern.source.slice(1, -1)})$`, "i")
@@ -30,11 +29,10 @@ interface StartBridgeServerArgs {
   port: number
   allowedOrigins: string[]
   projectDir: string
-  agentMode: AgentMode
-  model: string | undefined
+  // The agents of this daemon: their status and their own HTTP routes (sign-in flows) are served here.
+  providers: AgentProvider[]
   pairing: Pairing
   channels: WindowChannels
-  auth: ChatGptAuth
 }
 
 export interface BridgeServer {
@@ -42,7 +40,8 @@ export interface BridgeServer {
 }
 
 export async function startBridgeServer(args: StartBridgeServerArgs): Promise<BridgeServer> {
-  const { port, allowedOrigins, projectDir, agentMode, model, pairing, channels, auth } = args
+  const { port, allowedOrigins, projectDir, providers, pairing, channels } = args
+  const providerRoutes = providers.flatMap((provider) => provider.routes?.() ?? [])
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!isAllowedHost(req, port)) throw new HttpError(403, "Forbidden host")
@@ -50,10 +49,10 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     const url = parseOriginFormUrl(req.url, port)
     if (url === undefined) throw new HttpError(400, "bad_request")
     const method = req.method ?? "GET"
-    const isCallback = method === "GET" && url.pathname === "/auth/callback"
+    const providerRoute = providerRoutes.find((route) => route.method === method && route.path === url.pathname)
 
     const allowedOrigin = getAllowedOrigin(req, allowedOrigins)
-    if (req.headers.origin !== undefined && allowedOrigin === undefined && !isCallback) {
+    if (req.headers.origin !== undefined && allowedOrigin === undefined && providerRoute?.originExempt !== true) {
       throw new HttpError(403, "Forbidden origin")
     }
     applyCors(res, allowedOrigin)
@@ -88,30 +87,18 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
       return
     }
 
-    if (isCallback) {
-      const result = await auth.handleCallback(url)
-      sendHtml(res, result.ok ? 200 : 400, result.ok ? "Signed in" : "Sign-in failed", result.message)
+    if (providerRoute !== undefined) {
+      if (providerRoute.auth === "bearer") requireToken(req, pairing)
+      await providerRoute.handle({ req, res, url })
       return
     }
 
     if (method === "GET" && url.pathname === "/status") {
       requireToken(req, pairing)
-      const status: StatusResponse = { projectDir, agentMode, model, chatgpt: auth.getStatus() }
+      const agents: StatusResponse["agents"] = {}
+      for (const provider of providers) agents[provider.id] = provider.getStatus()
+      const status: StatusResponse = { projectDir, agents }
       sendJson(res, 200, status)
-      return
-    }
-
-    if (method === "POST" && url.pathname === "/auth/chatgpt/start") {
-      requireToken(req, pairing)
-      sendJson(res, 200, { authorizationUrl: auth.startSignIn() })
-      return
-    }
-
-    if (method === "POST" && url.pathname === "/auth/chatgpt/sign-out") {
-      requireToken(req, pairing)
-      await auth.signOut()
-      res.writeHead(204)
-      res.end()
       return
     }
 

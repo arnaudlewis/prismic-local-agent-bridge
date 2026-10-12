@@ -3,13 +3,16 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
 
+import { createChatGptAuth } from "./agents/codex/chatgptAuth.ts"
+import { resolveUserCodexHome } from "./agents/codex/codexConfig.ts"
+import { createCodexProvider } from "./agents/codex/codexProvider.ts"
+import { agentModes } from "./agents/codex/modes.ts"
+import type { AgentMode } from "./agents/codex/modes.ts"
+import type { AgentProvider } from "./agents/provider.ts"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
-import { createChatGptAuth } from "./agents/codex/chatgptAuth.ts"
-import { isolatedCodexHomePath, resolveUserCodexHome } from "./agents/codex/codexConfig.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
-import { agentModes, bridgeInfo } from "./protocol.ts"
-import type { AgentMode } from "./protocol.ts"
+import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
 
@@ -36,27 +39,27 @@ async function main(): Promise<void> {
     console.info("Forgot all paired browsers: every browser must pair again.")
   }
   const pairing = createPairing({ dataDir, onCodeChanged: (code) => console.info(`Pairing code: ${code}`) })
+  // The agent registry: each provider is one agent a browser can pick with `session.agent`. To add one, implement
+  // AgentProvider (src/agents/provider.ts), add its id to `agentIds` in protocol.ts and list it here.
+  const providers: AgentProvider[] = [
+    createCodexProvider({
+      dataDir,
+      auth: createChatGptAuth({ dataDir, redirectUri: `http://127.0.0.1:${options.port}/auth/callback` }),
+      userCodexHome,
+      agentMode: options.agentMode,
+      model: options.model,
+      refreshMarginMs: options.refreshMarginMs,
+    }),
+  ]
   const channels = createWindowChannels()
-  const auth = createChatGptAuth({ dataDir, redirectUri: `http://127.0.0.1:${options.port}/auth/callback` })
-  const agents = createAgentSessions({
-    channels,
-    auth,
-    dataDir,
-    userCodexHome,
-    projectDir: project.path,
-    agentMode: options.agentMode,
-    model: options.model,
-    refreshMarginMs: options.refreshMarginMs,
-  })
+  const agents = createAgentSessions({ channels, dataDir, projectDir: project.path, providers })
   const server = await startBridgeServer({
     port: options.port,
     allowedOrigins: options.origins,
     projectDir: project.path,
-    agentMode: options.agentMode,
-    model: options.model,
+    providers,
     pairing,
     channels,
-    auth,
   })
 
   console.info(`${bridgeInfo.name} ${bridgeInfo.version}`)
@@ -67,13 +70,9 @@ async function main(): Promise<void> {
   )
   console.info(`Listening on http://127.0.0.1:${options.port}`)
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
-  console.info(`Agent mode: ${options.agentMode}${options.model === undefined ? "" : `, model: ${options.model}`}`)
-  console.info(
-    userCodexHome === undefined
-      ? `Codex home: ${isolatedCodexHomePath(dataDir)} (isolated)`
-      : `Codex home: ${userCodexHome} (user)`,
-  )
-  console.info(`ChatGPT: ${auth.getStatus().status}`)
+  for (const provider of providers) {
+    for (const line of provider.bannerLines()) console.info(line)
+  }
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
   console.info(`Pairing code: ${pairing.currentCode()}`)
 

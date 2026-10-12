@@ -1,11 +1,11 @@
 import type { HistoryEvent } from "./protocol.ts"
 
-export const maxTranscriptEvents = 3000
-export const maxTranscriptBytes = 2 * 1024 * 1024
+const maxTranscriptEvents = 3000
+const maxTranscriptBytes = 2 * 1024 * 1024
 // A single event can't take a meaningful part of the log, and what is stored must stay loadable.
-export const maxEventTextLength = 100_000
-export const maxEventIdLength = 1000
-export const maxPermissionOptions = 20
+const maxEventTextLength = 100_000
+const maxEventIdLength = 1000
+const maxPermissionOptions = 20
 const truncationMarker = "…[truncated]"
 
 interface TranscriptLimits {

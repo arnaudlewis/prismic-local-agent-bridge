@@ -46,11 +46,11 @@ describe("createWindowChannels", () => {
     const newSocket = attach(channels)
 
     oldSocket.receive({ type: "permission_response", requestId: "r1", optionId: "allow" })
-    oldSocket.receive({ type: "threads_list", repository: "repo" })
+    oldSocket.receive({ type: "threads_list", repository: "repo", agent: "codex" })
     expect(received).toEqual([])
 
-    newSocket.receive({ type: "threads_list", repository: "repo" })
-    expect(received).toEqual([{ type: "threads_list", repository: "repo" }])
+    newSocket.receive({ type: "threads_list", repository: "repo", agent: "codex" })
+    expect(received).toEqual([{ type: "threads_list", repository: "repo", agent: "codex" }])
   })
 
   it("removes the listeners of the replaced socket", () => {
@@ -104,7 +104,7 @@ describe("createWindowChannels", () => {
     expect(received).toEqual([{ type: "chat_cancel" }])
 
     authorized = false
-    socket.receive({ type: "threads_list", repository: "repo" })
+    socket.receive({ type: "threads_list", repository: "repo", agent: "codex" })
     socket.receive({ type: "permission_response", requestId: "r1", optionId: "allow" })
 
     expect(received).toEqual([{ type: "chat_cancel" }])

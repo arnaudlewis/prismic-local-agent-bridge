@@ -6,7 +6,7 @@ import { z } from "zod"
 import { errorMessage } from "../../errors.ts"
 import { planUsageScope } from "./oauth.ts"
 
-export const CredentialsSchema = z.object({
+const CredentialsSchema = z.object({
   email: z.string().optional(),
   subject: z.string(),
   clientId: z.string(),

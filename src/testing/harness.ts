@@ -4,6 +4,8 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach } from "vitest"
 
+import { createCodexProvider } from "../agents/codex/codexProvider.ts"
+import type { AgentProvider } from "../agents/provider.ts"
 import { createAgentSessions } from "../agentSessions.ts"
 import type { AgentSessions } from "../agentSessions.ts"
 import type { BridgeConfigOption, BridgeEvent, HistoryEvent, Session } from "../protocol.ts"
@@ -13,6 +15,7 @@ export const fakeAgentBin = fileURLToPath(new URL("./fakeAcpAgent.ts", import.me
 export const windowId = "11111111-1111-4111-8111-111111111111"
 export const conversationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 export const session: Session = {
+  agent: "codex",
   conversationId,
   mcpServerUrl: "http://localhost:3030/mcp",
   prismicToken: "token",
@@ -43,6 +46,10 @@ export interface CreateHarnessArgs {
   // Off by default: most tests don't run an MCP server, and a failed read would add a notice to every prompt.
   readEditorContext?: boolean
   contextReadTimeoutMs?: number
+  // Replaces parts of the Codex provider (blocked commands, notices, ...) to show the machinery goes through it.
+  providerOverrides?: Partial<AgentProvider>
+  // Replaces the provider list altogether (e.g. none).
+  providers?: AgentProvider[]
 }
 
 export function createHarness(args: CreateHarnessArgs = {}): Harness {
@@ -58,12 +65,23 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
     onMessage: () => {},
     onWindowClosed: () => {},
   }
+  const codex = createCodexProvider({
+    dataDir,
+    auth: {
+      getAccessToken: () => Promise.resolve({ accessToken: "fake", expiresAt: 9_999_999_999_999 }),
+      getStatus: () => ({ status: "signed_in", planUsage: true }),
+    } as never,
+    userCodexHome: undefined,
+    agentMode: "read-only",
+    model: undefined,
+    refreshMarginMs: 1000,
+    agentBin: fakeAgentBin,
+  })
   const agents = createAgentSessions({
     channels,
-    auth: { getAccessToken: () => Promise.resolve({ accessToken: "fake", expiresAt: 9_999_999_999_999 }) } as never,
     dataDir,
-    userCodexHome: undefined,
-    agentBin: fakeAgentBin,
+    projectDir: tmpdir(),
+    providers: args.providers ?? [{ ...codex, ...args.providerOverrides }],
     idleTtlMs: args.idleTtlMs,
     maxLiveAgents: args.maxLiveAgents,
     maxConversations: args.maxConversations,
@@ -71,10 +89,6 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
     detachedSweepIntervalMs: args.detachedSweepIntervalMs,
     readEditorContext: args.readEditorContext ?? false,
     contextReadTimeoutMs: args.contextReadTimeoutMs,
-    projectDir: tmpdir(),
-    agentMode: "read-only",
-    model: undefined,
-    refreshMarginMs: 1000,
   })
   running.push(agents)
   return {

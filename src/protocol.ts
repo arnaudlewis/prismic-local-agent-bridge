@@ -2,9 +2,12 @@ import { z } from "zod"
 
 export const bridgeInfo = { name: "prismic-local-agent-bridge", version: "0.0.0" }
 
-export const agentModes = ["read-only", "workspace-write", "agent", "agent-full-access"] as const
+// The agents the daemon can run. Adding one is this line plus an AgentProvider (see src/agents/provider.ts).
+export const agentIds = ["codex"] as const
 
-export type AgentMode = (typeof agentModes)[number]
+export const AgentIdSchema = z.enum(agentIds)
+
+export type AgentId = z.infer<typeof AgentIdSchema>
 
 export const windowIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -12,6 +15,7 @@ export const windowIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 export const conversationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 const SessionSchema = z.object({
+  agent: AgentIdSchema,
   conversationId: z.string().regex(conversationIdPattern),
   // Only http(s), and no credentials in the URL: they would end up in logs and in the MCP configuration of the agent.
   mcpServerUrl: z
@@ -43,7 +47,7 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
     value: z.string().max(200),
   }),
   z.object({ type: z.literal("chat_cancel") }),
-  z.object({ type: z.literal("threads_list"), repository: z.string().min(1).max(200) }),
+  z.object({ type: z.literal("threads_list"), repository: z.string().min(1).max(200), agent: AgentIdSchema }),
   z.object({ type: z.literal("chat_delete"), conversationId: z.string().regex(conversationIdPattern) }),
   z.object({
     type: z.literal("permission_response"),
@@ -163,9 +167,15 @@ export interface ChatGptStatus {
   error?: string
 }
 
+export type AgentAccountStatus = { kind: "chatgpt" } & ChatGptStatus
+
+export interface AgentStatus {
+  agentMode: string
+  model?: string
+  account: AgentAccountStatus
+}
+
 export interface StatusResponse {
   projectDir: string
-  agentMode: AgentMode
-  model?: string
-  chatgpt: ChatGptStatus
+  agents: Partial<Record<AgentId, AgentStatus>>
 }

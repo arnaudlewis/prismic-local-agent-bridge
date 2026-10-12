@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -12,6 +12,7 @@ function stored(): StoredConversation {
   return {
     version: 1,
     conversationId,
+    agent: "codex",
     repository: "repo",
     acpSessionId: "session-1",
     updatedAt: 1,
@@ -118,5 +119,70 @@ describe("createConversationStore", () => {
     }
     expect(warn.mock.calls.flat().join(" ")).not.toContain("SECRET")
     warn.mockRestore()
+  })
+
+  describe("agent", () => {
+    function writeRaw(dataDir: string, id: string, content: unknown): void {
+      mkdirSync(join(dataDir, "conversations"), { recursive: true })
+      writeFileSync(join(dataDir, "conversations", `${id}.json`), JSON.stringify(content))
+    }
+
+    it("is saved with the conversation", () => {
+      const { dataDir, store } = createStore()
+      store.save(stored())
+
+      const raw = JSON.parse(readFileSync(join(dataDir, "conversations", `${conversationId}.json`), "utf8"))
+
+      expect(raw.agent).toBe("codex")
+      expect(store.load(conversationId)?.agent).toBe("codex")
+    })
+
+    it("defaults to codex for a file written before there were several agents", () => {
+      const { dataDir, store } = createStore()
+      const { agent: _agent, ...legacy } = stored()
+      writeRaw(dataDir, conversationId, legacy)
+
+      expect(store.load(conversationId)?.agent).toBe("codex")
+    })
+
+    it("ignores a file of an agent this daemon doesn't know, like any corrupt file", () => {
+      const { dataDir, store } = createStore()
+      writeRaw(dataDir, conversationId, { ...stored(), agent: "claude" })
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+      expect(store.load(conversationId)).toBeUndefined()
+      warn.mockRestore()
+    })
+
+    it("lists threads of that agent only, and migrates index entries without an agent to codex", () => {
+      const { dataDir, store } = createStore()
+      const legacyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+      writeRaw(dataDir, legacyId, { ...stored(), conversationId: legacyId, agent: undefined, title: "Legacy" })
+      mkdirSync(join(dataDir, "conversations"), { recursive: true })
+      writeFileSync(
+        join(dataDir, "conversations", "index.json"),
+        JSON.stringify({
+          version: 1,
+          entries: [{ conversationId: legacyId, repository: "repo", title: "Legacy", updatedAt: 5 }],
+        }),
+      )
+
+      expect(store.listThreads("repo", "codex")).toEqual([{ conversationId: legacyId, title: "Legacy", updatedAt: 5 }])
+      expect(store.threadOf(legacyId)).toEqual({ repository: "repo", agent: "codex" })
+      store.save({ ...stored(), title: "New" })
+      const index = JSON.parse(readFileSync(join(dataDir, "conversations", "index.json"), "utf8")) as {
+        entries: Array<{ agent: string }>
+      }
+      expect(index.entries.map((entry) => entry.agent)).toEqual(["codex", "codex"])
+    })
+
+    it("rebuilds the index with the agent of each file, defaulting legacy files to codex", () => {
+      const { dataDir, store } = createStore()
+      const legacyId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+      writeRaw(dataDir, legacyId, { ...stored(), conversationId: legacyId, agent: undefined })
+
+      expect(store.listThreads("repo", "codex").map((thread) => thread.conversationId)).toEqual([legacyId])
+      expect(JSON.parse(readFileSync(join(dataDir, "conversations", "index.json"), "utf8")).entries[0].agent).toBe("codex")
+    })
   })
 })

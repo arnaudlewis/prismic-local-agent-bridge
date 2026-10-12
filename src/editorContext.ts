@@ -16,24 +16,6 @@ export interface ToolIdentity {
   tool: string
 }
 
-interface ToolCallFields {
-  title?: unknown
-  rawInput?: unknown
-}
-
-// codex-acp titles MCP calls `mcp.<server>.<tool>` and puts { server, tool, arguments } in rawInput. Updates repeat
-// neither when they are unchanged, so callers remember the identity from the start report.
-export function identifyTool(fields: ToolCallFields): ToolIdentity | undefined {
-  const input = fields.rawInput
-  if (typeof input === "object" && input !== null) {
-    const { server, tool } = input as { server?: unknown; tool?: unknown }
-    if (typeof server === "string" && typeof tool === "string") return { server, tool }
-  }
-  const match = typeof fields.title === "string" ? /^mcp\.([^.]+)\.(.+)$/.exec(fields.title) : null
-  if (match?.[1] !== undefined && match[2] !== undefined) return { server: match[1], tool: match[2] }
-  return undefined
-}
-
 export function isEditorContextTool(identity: ToolIdentity | undefined): boolean {
   return identity?.server === mcpServerName && identity.tool === editorContextTool
 }

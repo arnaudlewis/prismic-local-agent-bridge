@@ -41,6 +41,10 @@ function write(message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`)
 }
 
+function fail(id: unknown, message: string): void {
+  write({ jsonrpc: "2.0", id, error: { code: -32603, message } })
+}
+
 function respond(id: unknown, result: unknown): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`)
 }
@@ -108,6 +112,28 @@ function handlePrompt(message: Message): void {
   const blocks = message.params?.prompt ?? []
   // The bridge appends a one-line reminder after the user's text on regular prompts; the user's text is the block before it.
   const text = blocks.filter((block) => !block.text.startsWith("Reminder: call get_editor_context")).at(-1)?.text ?? ""
+  if (text.startsWith("echo-env ")) {
+    const name = text.slice("echo-env ".length).trim()
+    chunk(`env:${name}=${process.env[name] ?? ""}`)
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
+  if (text.startsWith("fail-prompt")) {
+    fail(message.id, text)
+    return
+  }
+  // A tool call in a format codex-acp doesn't use: title "Prismic/<tool>" and rawOutput { json }.
+  if (text.startsWith("emit-custom-tool ")) {
+    notify({ sessionUpdate: "tool_call", toolCallId: "custom-1", title: "Prismic/get_editor_context", status: "in_progress" })
+    notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "custom-1",
+      status: "completed",
+      rawOutput: { json: JSON.parse(text.slice("emit-custom-tool ".length)) },
+    })
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
   if (text.includes("flood-permissions")) {
     heldPromptId = message.id
     for (let index = 0; index < 25; index++) {
@@ -198,6 +224,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       respond(message.id, { sessionId: "fake-session", configOptions: configOptions() })
       break
     case "session/load":
+      if (process.env.FAKE_AGENT_FAIL_LOAD !== undefined) {
+        fail(message.id, "Internal error")
+        break
+      }
       sessionKind = "load"
       captureWindowHeader(message)
       publishCommands()

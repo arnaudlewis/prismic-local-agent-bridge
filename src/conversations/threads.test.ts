@@ -9,7 +9,7 @@ import type { Harness } from "../testing/harness.ts"
 describe("thread list", () => {
   async function list(harness: Harness, repository = "repo", target = windowA) {
     harness.eventsFor(target).length = 0
-    await harness.agents.handleMessage(target, { type: "threads_list", repository })
+    await harness.agents.handleMessage(target, { type: "threads_list", repository, agent: "codex" })
     return lastThreads(harness.eventsFor(target))
   }
 
@@ -17,7 +17,7 @@ describe("thread list", () => {
     const harness = createHarness()
     writeStored(harness.dataDir, conversationIdFor(1), { title: "First", updatedAt: 1000 })
 
-    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo" })
+    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
 
     expect(harness.eventsFor(windowA)).toEqual([
       { type: "threads", threads: [{ conversationId: conversationIdFor(1), title: "First", updatedAt: 1000 }] },
@@ -102,7 +102,7 @@ describe("thread list", () => {
 describe("thread index", () => {
   async function list(harness: Harness) {
     harness.eventsFor(windowA).length = 0
-    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo" })
+    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     return lastThreads(harness.eventsFor(windowA))
   }
 
@@ -118,8 +118,8 @@ describe("thread index", () => {
     expect(readIndex(harness.dataDir)).toEqual({
       version: 1,
       entries: expect.arrayContaining([
-        { conversationId: conversationIdFor(1), repository: "repo", title: "One", updatedAt: 1 },
-        { conversationId: conversationIdFor(2), repository: "repo", title: "Two", updatedAt: 2 },
+        { conversationId: conversationIdFor(1), agent: "codex", repository: "repo", title: "One", updatedAt: 1 },
+        { conversationId: conversationIdFor(2), agent: "codex", repository: "repo", title: "Two", updatedAt: 2 },
       ]),
     })
   })
@@ -208,7 +208,7 @@ describe("thread index", () => {
 
     expect(existsSync(join(harness.dataDir, "conversations", `${conversationIdFor(1)}.json`))).toBe(false)
     expect(readIndex(harness.dataDir).entries.map((entry) => entry.title)).toEqual(["Recent"])
-    await restarted.agents.handleMessage(windowA, { type: "threads_list", repository: "repo" })
+    await restarted.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     expect(lastThreads(restarted.eventsFor(windowA))?.map((thread) => thread.title)).toEqual(["Recent"])
   })
 })
@@ -262,7 +262,7 @@ describe("thread list pushes", () => {
     harness.agents.detachWindow(windowFor(1))
     const before = harness.eventsFor(windowFor(1)).length
 
-    await harness.agents.handleMessage(windowFor(2), { type: "threads_list", repository: "repo" })
+    await harness.agents.handleMessage(windowFor(2), { type: "threads_list", repository: "repo", agent: "codex" })
 
     expect(harness.eventsFor(windowFor(1))).toHaveLength(before)
   })
@@ -335,7 +335,7 @@ describe("chat_delete", () => {
   it("answers an unknown id with the current list and changes nothing", async () => {
     const harness = createHarness()
     writeStored(harness.dataDir, conversationIdFor(1), { title: "Known", updatedAt: 1 })
-    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo" })
+    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     harness.eventsFor(windowA).length = 0
 
     await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId: conversationIdFor(99) })
@@ -442,7 +442,7 @@ describe("switching threads", () => {
     expect(liveAgentText(harness.eventsFor(windowFor(1)))).not.toContain("for two")
     expect(liveAgentText(harness.eventsFor(windowFor(2)))).toContain("prompt:for two")
     expect(liveAgentText(harness.eventsFor(windowFor(2)))).not.toContain("for one")
-    await harness.agents.handleMessage(windowFor(1), { type: "threads_list", repository: "repo" })
+    await harness.agents.handleMessage(windowFor(1), { type: "threads_list", repository: "repo", agent: "codex" })
     expect(lastThreads(harness.eventsFor(windowFor(1)))?.map((thread) => thread.title).sort()).toEqual(["for one", "for two"])
   })
 

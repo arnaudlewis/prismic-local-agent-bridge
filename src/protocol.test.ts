@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import { ClientMessageSchema } from "./protocol.ts"
 
 const base = {
+  agent: "codex",
   conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   prismicToken: "token",
   repository: "repo",
@@ -58,7 +59,7 @@ describe("session.mcpServerUrl", () => {
 
 describe("thread messages", () => {
   it("accepts threads_list and chat_delete", () => {
-    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo" }).success).toBe(true)
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "codex" }).success).toBe(true)
     expect(
       ClientMessageSchema.safeParse({ type: "chat_delete", conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })
         .success,
@@ -80,5 +81,39 @@ describe("thread messages", () => {
 
   it("no longer knows chat_reset", () => {
     expect(ClientMessageSchema.safeParse({ type: "chat_reset" }).success).toBe(false)
+  })
+})
+
+describe("session.agent", () => {
+  const withAgent = (agent: unknown) =>
+    ClientMessageSchema.safeParse({
+      type: "chat_open",
+      session: { ...base, agent, mcpServerUrl: "http://localhost:3030/mcp" },
+    }).success
+
+  it("is required and must be a known agent", () => {
+    expect(withAgent("codex")).toBe(true)
+    expect(withAgent(undefined)).toBe(false)
+    expect(withAgent("claude")).toBe(false)
+    expect(withAgent("Codex")).toBe(false)
+    expect(withAgent("")).toBe(false)
+    expect(withAgent(1)).toBe(false)
+  })
+
+  it("is required on chat_prompt sessions too", () => {
+    const { agent: _agent, ...withoutAgent } = base
+    expect(
+      ClientMessageSchema.safeParse({
+        type: "chat_prompt",
+        text: "hi",
+        session: { ...withoutAgent, mcpServerUrl: "http://localhost:3030/mcp" },
+      }).success,
+    ).toBe(false)
+  })
+
+  it("is required on threads_list, which lists only that agent's conversations", () => {
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "codex" }).success).toBe(true)
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo" }).success).toBe(false)
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "claude" }).success).toBe(false)
   })
 })

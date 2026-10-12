@@ -1,15 +1,15 @@
 // The OAuth pieces of "Sign in with ChatGPT" that don't touch the disk or the network.
 
 export const issuer = "https://auth.openai.com"
-export const authorizationEndpoint = `${issuer}/api/accounts/authorize`
+const authorizationEndpoint = `${issuer}/api/accounts/authorize`
 export const tokenEndpoint = `${issuer}/api/accounts/oauth/token`
 export const jwksEndpoint = `${issuer}/.well-known/jwks.json`
 export const discoveryEndpoint = `${issuer}/.well-known/openid-configuration`
 export const resource = "https://api.openai.com/v1"
 export const scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 export const planUsageScope = "chatgpt.tokens.use.direct"
-export const agentNameHint = "Prismic Local Agent"
-export const dynamicClientId = "dynamic_agent_client"
+const agentNameHint = "Prismic Local Agent"
+const dynamicClientId = "dynamic_agent_client"
 export const attemptTtlMs = 10 * 60 * 1000
 export const requestTimeoutMs = 15_000
 

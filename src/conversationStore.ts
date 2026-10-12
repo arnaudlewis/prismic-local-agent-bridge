@@ -13,8 +13,8 @@ import {
 import { join } from "node:path"
 import { z } from "zod"
 
-import { HistoryEventSchema, conversationIdPattern } from "./protocol.ts"
-import type { ThreadSummary } from "./protocol.ts"
+import { AgentIdSchema, HistoryEventSchema, conversationIdPattern } from "./protocol.ts"
+import type { AgentId, ThreadSummary } from "./protocol.ts"
 import { deriveTitle } from "./threadTitle.ts"
 
 const maxFileAgeMs = 30 * 24 * 60 * 60 * 1000
@@ -24,11 +24,15 @@ const maxIndexFileBytes = 256 * 1024
 const maxIndexEntries = 500
 // Rebuilding the index parses transcripts: it looks at no more files than this.
 const maxFilesScannedForIndex = 200
-export const maxListedThreads = 50
+const maxListedThreads = 50
+
+// Files and index entries written before there was more than one agent have no `agent`: they are Codex's.
+const legacyAgent = "codex"
 
 const StoredConversationSchema = z.object({
   version: z.literal(1),
   conversationId: z.string().max(36),
+  agent: AgentIdSchema.default(legacyAgent),
   repository: z.string().max(200),
   acpSessionId: z.string().max(1000).optional(),
   pinnedDocumentId: z.string().max(300).optional(),
@@ -41,6 +45,7 @@ export type StoredConversation = z.infer<typeof StoredConversationSchema>
 
 const IndexEntrySchema = z.object({
   conversationId: z.string().regex(conversationIdPattern),
+  agent: AgentIdSchema.default(legacyAgent),
   repository: z.string().max(200),
   title: z.string().max(200),
   updatedAt: z.number(),
@@ -57,10 +62,10 @@ export interface ConversationStore {
   load(conversationId: string): StoredConversation | undefined
   save(conversation: StoredConversation): void
   remove(conversationId: string): void
-  // Threads of one repository, newest first, from the index (no transcript is parsed).
-  listThreads(repository: string): ThreadSummary[]
-  // The repository of an indexed thread, if the daemon knows it.
-  threadRepository(conversationId: string): string | undefined
+  // Threads of one repository and agent, newest first, from the index (no transcript is parsed).
+  listThreads(repository: string, agent: AgentId): ThreadSummary[]
+  // The repository and agent of an indexed thread, if the daemon knows it.
+  threadOf(conversationId: string): { repository: string; agent: AgentId } | undefined
   pruneOldFiles(now: number): void
 }
 
@@ -185,6 +190,7 @@ export function createConversationStore(args: { dataDir: string }): Conversation
     if (title === undefined) return undefined
     return {
       conversationId: conversation.conversationId,
+      agent: conversation.agent,
       repository: conversation.repository,
       title,
       updatedAt: conversation.updatedAt,
@@ -198,6 +204,7 @@ export function createConversationStore(args: { dataDir: string }): Conversation
     const existing = entries.get(entry.conversationId)
     if (
       existing?.title === entry.title &&
+      existing.agent === entry.agent &&
       existing.repository === entry.repository &&
       existing.updatedAt === entry.updatedAt
     ) {
@@ -219,10 +226,10 @@ export function createConversationStore(args: { dataDir: string }): Conversation
       const entries = ensureIndex()
       if (entries.delete(conversationId)) persistIndex()
     },
-    listThreads(repository) {
+    listThreads(repository, agent) {
       const entries = ensureIndex()
       const newestFirst = [...entries.values()]
-        .filter((entry) => entry.repository === repository)
+        .filter((entry) => entry.repository === repository && entry.agent === agent)
         .sort((a, b) => b.updatedAt - a.updatedAt)
       const threads: ThreadSummary[] = []
       let dropped = false
@@ -239,7 +246,10 @@ export function createConversationStore(args: { dataDir: string }): Conversation
       if (dropped) persistIndex()
       return threads
     },
-    threadRepository: (conversationId) => ensureIndex().get(conversationId)?.repository,
+    threadOf(conversationId) {
+      const entry = ensureIndex().get(conversationId)
+      return entry === undefined ? undefined : { repository: entry.repository, agent: entry.agent }
+    },
     pruneOldFiles(now) {
       let names: string[]
       try {

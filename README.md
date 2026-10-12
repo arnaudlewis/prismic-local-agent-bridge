@@ -80,11 +80,11 @@ Changelog: the `--allow-full-access` flag and the `Full access: allowed|disabled
 
 ## Persistent conversations
 
-A conversation is identified by a `conversationId` (a lowercase UUID v4 the browser sends in `session` with `chat_open` and `chat_prompt`; anything else is rejected, because it becomes a filename). It is not tied to a browser window anymore:
+A conversation is identified by a `conversationId` (a lowercase UUID v4 the browser sends in `session` with `chat_open` and `chat_prompt`; anything else is rejected, because it becomes a filename) and belongs to one agent (`session.agent`, see Architecture). It is not tied to a browser window anymore:
 
 - **Refresh:** the agent keeps running, even mid-turn, when the page closes or reloads; closing the socket only detaches the window. The newest window attached to a conversation receives its live events; an older one just stops receiving. On `chat_open` the bridge first sends `{ "type": "chat_history", "events": [...] }` (user messages, agent text, tool calls, permission requests, notices, turn ends), then `session_config`, `available_commands` and the current `chat_status` (`running` if a turn is active). A permission request the agent is still waiting on stays a plain `permission_request` and can still be answered; answered or cancelled ones are followed by a `permission_resolved`.
 - **Window binding:** the MCP header `X-Prismic-Window-Id` follows the attached window. The first `chat_open` or `chat_prompt` from a new window restarts the agent (never during a turn) and resumes its session with ACP `session/load`.
-- **Daemon restart:** each conversation is saved to `<data dir>/conversations/<conversationId>.json` (`{ version, conversationId, repository, acpSessionId?, updatedAt, events }`), in a `0700` directory with `0600` files, written atomically and debounced (about 500 ms, flushed on exit). The file is loaded on the first `chat_open` of that id and the agent resumes the stored ACP session. If the session can't be resumed, a new one starts with the notice "Started a new agent session after renewing the ChatGPT token; earlier messages aren't in the agent's memory." A corrupt file is ignored with a warning. A session only resumes once a prompt has been sent in it.
+- **Daemon restart:** each conversation is saved to `<data dir>/conversations/<conversationId>.json` (`{ version, conversationId, agent, repository, acpSessionId?, pinnedDocumentId?, title?, updatedAt, events }`; files written before `agent` existed are read as `codex`), in a `0700` directory with `0600` files, written atomically and debounced (about 500 ms, flushed on exit). The file is loaded on the first `chat_open` of that id and the agent resumes the stored ACP session. If the session can't be resumed, a new one starts with the notice "Started a new agent session after renewing the ChatGPT token; earlier messages aren't in the agent's memory." A corrupt file is ignored with a warning. A session only resumes once a prompt has been sent in it.
 - **Transcript limits:** consecutive text chunks of the same message are merged, and the log is capped at 3000 events or about 2 MB; the oldest events are dropped first, but never a permission request that is still unanswered.
 - **TTL:** a conversation with no window attached and no turn running is stopped after 6 hours (it stays on disk). Files older than 30 days are deleted at startup.
 - **New chat and delete:** a new chat is simply a new `conversationId` (see Threads); the previous one stays persisted and its agent stays alive, detached, within the limits below. `chat_delete` stops a conversation's agent and deletes its transcript, stored session, file and index entry; opening that id again starts a fresh conversation, with a new preamble.
@@ -99,13 +99,47 @@ A conversation is identified by a `conversationId` (a lowercase UUID v4 the brow
 
 The transcript contains your prompts and the agent's replies and tool titles in plain text: treat the `conversations/` directory as private.
 
+## Architecture
+
+The daemon is split so that Codex is one agent among others: the conversation machinery knows nothing about a particular agent, and an `AgentProvider` supplies everything agent-specific.
+
+```
+src/
+  cli.ts, bridgeServer.ts, httpUtils.ts   HTTP + WebSocket server, flags, banner, the provider registry
+  pairing.ts, windowChannels.ts           pairing tokens, one WebSocket channel per browser window
+  agentSessions.ts                        facade: routes client messages to the conversation modules
+  conversations/                          agent-agnostic machinery (plain functions over a shared Context)
+    registry.ts                           conversation map, window attach/detach, caps, eviction, detached limits
+    agentProcess.ts                       spawn the ACP child, handshake, resume, restart; generation fences
+    turn.ts, chatOpen.ts                  one user message / opening a conversation
+    turnContext.ts                        per-turn editor context read, editor_context events
+    sessionConfig.ts, sessionUpdates.ts   config options, agent notifications -> events
+    permissions.ts, stop.ts, idle.ts      approvals, stopping agents, idle TTL
+    threads.ts, output.ts, commands.ts, preamble.ts, context.ts, types.ts
+  agents/
+    provider.ts                           the AgentProvider interface
+    codex/                                the Codex provider: codexProvider.ts, commands.ts, toolCalls.ts,
+                                          codexConfig.ts, chatgptAuth.ts (+ oauth*.ts, credentialsFile.ts)
+  conversationStore.ts, transcript.ts     persistence (files + thread index), bounded transcript
+  editorContext*.ts                       parsing get_editor_context, building the context block
+  protocol.ts                             wire schemas and types
+```
+
+**Wire changes for several agents.** `session` (in `chat_open` and `chat_prompt`) has a required `agent` (`"codex"` for now), `threads_list` is `{ type, repository, agent }` and lists only that agent's conversations, and `GET /status` (Bearer) answers `{ "projectDir": string, "agents": { "codex": { "agentMode": string, "model"?: string, "account": { "kind": "chatgpt", "status": "signed_out" | "signing_in" | "signed_in", "email"?: string, "planUsage": boolean, "error"?: string } } } }`. The sign-in routes `/auth/chatgpt/start`, `/auth/chatgpt/sign-out` and `/auth/callback` are registered by the Codex provider. Everything else on the wire (`chat_history`, `threads`, events) is unchanged.
+
+**The provider interface** (`src/agents/provider.ts`): `id` and `label`; `authenticate()` (returns the environment the child needs and a fingerprint that restarts a running agent when it changes, or throws `AgentAuthError` with the notice to show); `spawnSpec()` (command, arguments, environment); the command policy (`blockedCommands`, `hiddenCommands`, `nativeCommandName()` which must mirror the agent's own parsing, `protectedConfigIds`); how MCP tool calls are reported (`identifyToolCall()`, `readToolResult()`, used to catch `get_editor_context` results); `describePromptError()`, `sessionRestartedNotice`, `preambleAdditions()`; `getStatus()` and `bannerLines()`; and optional HTTP `routes()`.
+
+**Adding an agent** (say Claude): implement an `AgentProvider` in `src/agents/claude/`, add `"claude"` to `agentIds` in `protocol.ts` (one line: `session.agent` and `threads_list.agent` accept it, and stored conversations keep their agent), extend `AgentAccountStatus` in `protocol.ts` if its account isn't a ChatGPT one, and list the provider in the registry in `cli.ts`. The conversation modules need no change. Conversation files and index entries carry the agent; a conversation id belongs to one agent for good.
+
+What is still shaped by ACP, not by Codex: the machinery assumes an ACP agent that supports HTTP MCP servers and `session/load`, the `mode` / `model` config option ids (the model is re-applied first on restart), and the ACP tool call and permission notifications.
+
 ## Threads
 
 A thread is a persisted conversation. The browser lists, switches and deletes them; there is no `chat_reset`.
 
-- **List:** `{ "type": "threads_list", "repository": "<name>" }` is answered with `{ "type": "threads", "threads": [{ "conversationId", "title", "updatedAt" }] }`: only conversations of that repository that have at least one user message, newest first (`updatedAt` is epoch milliseconds, the time of the last user message or finished turn), at most 50. The same `threads` event is pushed to the attached window after the first user message of a conversation (its title appears), after each `turn_end`, and after `chat_delete`.
+- **List:** `{ "type": "threads_list", "repository": "<name>", "agent": "codex" }` is answered with `{ "type": "threads", "threads": [{ "conversationId", "title", "updatedAt" }] }`: only conversations of that repository and agent that have at least one user message, newest first (`updatedAt` is epoch milliseconds, the time of the last user message or finished turn), at most 50. The same `threads` event is pushed to the attached window after the first user message of a conversation (its title appears), after each `turn_end`, and after `chat_delete`.
 - **Title:** the first user message, collapsed to one line and cut at 80 characters with an ellipsis (`Untitled chat` if it is blank). It is set once and stored in the conversation file (`title`, next to `updatedAt`).
-- **Index:** listing never parses transcripts. `<data dir>/conversations/index.json` (`0600`, atomic writes, at most 256 KiB and 500 entries, schema-validated) holds `{ conversationId, repository, title, updatedAt }` for each thread and is updated whenever a conversation is saved or deleted. If it is missing, corrupt or oversized it is rebuilt lazily from the conversation files (at most 200 files, each loaded with the usual size and schema limits; older files without a title get theirs from their first user message). Entries whose file vanished are dropped. The 30-day pruning of old files also prunes the index.
+- **Index:** listing never parses transcripts. `<data dir>/conversations/index.json` (`0600`, atomic writes, at most 256 KiB and 500 entries, schema-validated) holds `{ conversationId, agent, repository, title, updatedAt }` for each thread (entries without `agent` are read as `codex`) and is updated whenever a conversation is saved or deleted. If it is missing, corrupt or oversized it is rebuilt lazily from the conversation files (at most 200 files, each loaded with the usual size and schema limits; older files without a title get theirs from their first user message). Entries whose file vanished are dropped. The 30-day pruning of old files also prunes the index.
 - **Delete:** `{ "type": "chat_delete", "conversationId": "<uuid>" }` stops that conversation's agent (its turn and pending permissions are cancelled), removes its file, index entry and in-memory state, detaches the window(s) it was attached to, and answers with the updated `threads` list (of its repository). An id the daemon doesn't know (neither running nor in the index) changes nothing and just gets the current list.
 - **New chat and switching:** the browser starts a new chat by using a new `conversationId`; it switches thread by sending `chat_open` with another one. Attaching a conversation to a window detaches the previous one (its events no longer reach the window, but its agent keeps running and recording, within the caps and TTL), and two windows can show different threads. Mode and other config choices belong to their conversation: a new conversation starts from the `--agent-mode` defaults.
 
