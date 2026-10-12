@@ -53,7 +53,7 @@ describe("message redactor (a key split across chunks)", () => {
     const redactor = createMessageRedactor()
     const out: string[] = []
     for (const chunk of chunks) for (const piece of redactor.push("m1", chunk, secrets)) out.push(piece.text)
-    for (const piece of redactor.flush(secrets)) out.push(piece.text)
+    for (const piece of redactor.flushAll(secrets)) out.push(piece.text)
     return out.join("")
   }
 
@@ -82,7 +82,7 @@ describe("message redactor (a key split across chunks)", () => {
     expect(redactor.push("m1", "hello world ", [key])).toEqual([{ messageId: "m1", text: "hello world " }])
     // An "s" could be the start of a key: it waits for the next chunk (or the end of the message).
     expect(redactor.push("m1", "and this ends in s", [key])).toEqual([{ messageId: "m1", text: "and this ends in " }])
-    expect(redactor.flush([key])).toEqual([{ messageId: "m1", text: "s" }])
+    expect(redactor.flushAll([key])).toEqual([{ messageId: "m1", text: "s" }])
   })
 
   it("holds back only what could still become a key, and gives it back when it doesn't", () => {
@@ -96,26 +96,50 @@ describe("message redactor (a key split across chunks)", () => {
     const redactor = createMessageRedactor()
     redactor.push("m1", "see sk-", [key])
 
-    expect(redactor.flush([key])).toEqual([{ messageId: "m1", text: "sk-" }])
+    expect(redactor.flushAll([key])).toEqual([{ messageId: "m1", text: "sk-" }])
   })
 
   it("redacts a long key prefix that never finished instead of releasing it", () => {
     const redactor = createMessageRedactor()
     redactor.push("m1", "leaked sk-ant-api03-ABCDEFGH", [])
 
-    expect(redactor.flush([])).toEqual([{ messageId: "m1", text: marker }])
+    expect(redactor.flushAll([])).toEqual([{ messageId: "m1", text: marker }])
   })
 
-  it("does not mix up two messages: the tail of one is released before the next begins", () => {
+  it("holds the tail of each message apart: another message neither releases it nor completes it", () => {
+    const redactor = createMessageRedactor()
+    redactor.push("m1", `the key is ${key.slice(0, 12)}`, [key])
+
+    expect(redactor.push("m2", "second message", [key])).toEqual([{ messageId: "m2", text: "second message" }])
+    expect(redactor.push("m2", key.slice(12), [key])).toEqual([{ messageId: "m2", text: key.slice(12) }])
+    // A whole key at the end of a chunk is still held: the next character could extend it.
+    expect(redactor.push("m1", key.slice(12), [key])).toEqual([])
+    expect(redactor.push("m1", " thanks!", [key])).toEqual([{ messageId: "m1", text: `${marker} thanks!` }])
+  })
+
+  it("gives back the tails of every message at a boundary: a key prefix redacted whatever its length, other text as it is", () => {
     const redactor = createMessageRedactor()
     redactor.push("m1", "ends with sk-", [key])
+    redactor.push("m2", "leaked sk-ant-api03-", [key])
+    redactor.push("m3", "just sk-ant-", [key])
 
-    const out = redactor.push("m2", "second message", [key])
-
-    expect(out).toEqual([
+    expect(redactor.flushAll([key])).toEqual([
       { messageId: "m1", text: "sk-" },
-      { messageId: "m2", text: "second message" },
+      { messageId: "m2", text: marker },
+      { messageId: "m3", text: marker },
     ])
+    expect(redactor.flushAll([key])).toEqual([])
+  })
+
+  it("never holds more than a few unfinished messages: the oldest is released, redacted if it starts like a key", () => {
+    const redactor = createMessageRedactor()
+    const released: string[] = []
+    for (let index = 0; index < 12; index++) {
+      for (const piece of redactor.push(`m${index}`, "text sk-ant-api03-", [key])) released.push(piece.text)
+    }
+
+    expect(released.filter((text) => text === marker)).toHaveLength(4)
+    expect(released.join("")).not.toContain("sk-ant")
   })
 })
 
@@ -269,5 +293,70 @@ describe("the API key in what an agent says", () => {
     await harness.agents.handleMessage(channel, { type: "chat_prompt", text: "env-tail ANTHROPIC_API_KEY", session: claudeSession })
 
     expect(liveAgentText(harness.events)).toBe(`envtail:ANTHROPIC_API_KEY=${key.slice(-4)}`)
+  })
+
+  describe("when other events of the turn arrive in the middle of a message", () => {
+    // What the agent said, as the stored conversation has it (the user's own message has the script, not the key).
+    function storedAgentText(harness: ReturnType<typeof setup>["harness"]): string {
+      harness.agents.stopAll()
+      const dir = `${harness.dataDir}/conversations`
+      return readdirSync(dir)
+        .filter((name) => name !== "index.json")
+        .flatMap((name) => (JSON.parse(readFileSync(`${dir}/${name}`, "utf8")) as { events: { type: string; text?: string }[] }).events)
+        .flatMap((event) => (event.type === "agent_message_chunk" ? [event.text ?? ""] : []))
+        .join("")
+    }
+
+    it.each([
+      ["inside the prefix", `the key is sk-an|@tool|t-${key.slice(7)} thanks!`],
+      ["right after the prefix", `the key is sk-ant-|@tool|${key.slice(7)} thanks!`],
+      ["after sk-ant-api03-", `the key is sk-ant-api03-|@tool|${key.slice(13)} thanks!`],
+      ["after its first letter", `the key is s|@tool|${key.slice(1)} thanks!`],
+      ["several times", `the key is sk-ant-|@tool|api03-|@tool|${key.slice(13, 20)}|@tool|${key.slice(20)} thanks!`],
+    ])("does not release the pieces of a key split %s", async (_name, script) => {
+      const { harness } = setup()
+      await open(harness)
+
+      await harness.agents.handleMessage(channel, { type: "chat_prompt", text: `say-chunks m1 ${script}`, session: claudeSession })
+
+      expect(liveAgentText(harness.events)).toBe(`the key is ${marker} thanks!`)
+      expect(storedAgentText(harness)).toBe(`the key is ${marker} thanks!`)
+    })
+
+    it("keeps the interleaved events, and the text around them in order", async () => {
+      const { harness } = setup()
+      await open(harness)
+
+      await harness.agents.handleMessage(channel, { type: "chat_prompt", text: "say-chunks m1 before |@tool| after", session: claudeSession })
+
+      expect(harness.events.filter((event) => event.type === "tool_call")).toHaveLength(1)
+      expect(liveAgentText(harness.events)).toBe("before  after")
+    })
+
+    it("redacts a key prefix that was never completed when the turn ends, and keeps an ordinary tail", async () => {
+      const { harness } = setup()
+      await open(harness)
+
+      await harness.agents.handleMessage(channel, { type: "chat_prompt", text: "say-chunks m1 leaked sk-ant-api03-", session: claudeSession })
+      expect(liveAgentText(harness.events)).toBe(`leaked ${marker}`)
+
+      harness.events.length = 0
+      await harness.agents.handleMessage(channel, { type: "chat_prompt", text: "say-chunks m2 the answer is yes, as always ends with s", session: claudeSession })
+      expect(liveAgentText(harness.events)).toBe("the answer is yes, as always ends with s")
+      expect(harness.events.findLast((event) => event.type === "turn_end")).toBeDefined()
+    })
+
+    it("says what a stopped agent was still holding, redacted when it starts like a key", async () => {
+      const { harness } = setup()
+      await open(harness)
+      // The held turn never ends; the agent is stopped (the conversation deleted) with a tail still held.
+      const turn = harness.agents.handleMessage(channel, { type: "chat_prompt", text: "hold-after-chunks m1 so sk-ant-api03-", session: claudeSession })
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      harness.agents.stopAll()
+      await turn.catch(() => {})
+
+      expect(liveAgentText(harness.events)).toBe(`so ${marker}`)
+    })
   })
 })

@@ -49,40 +49,59 @@ function heldSuffixLength(text: string, secrets: readonly string[]): number {
   return 0
 }
 
-// The text of one assistant message arrives in chunks, and a key can be split across them. This keeps the unfinished
-// tail of a possible key until the next chunk says what it was, so no piece of a key is ever sent or stored.
-export interface MessageRedactor {
-  // The text that is safe to emit now (possibly empty), for a chunk of the message `messageId`.
-  push(messageId: string | undefined, text: string, secrets: readonly string[]): { messageId: string | undefined; text: string }[]
-  // What is still held, once the message is over (a possible key that wasn't one, or one that never finished).
-  flush(secrets: readonly string[]): { messageId: string | undefined; text: string }[]
+// A piece of one assistant message, safe to send and store.
+export interface MessagePiece {
+  messageId: string | undefined
+  text: string
 }
 
-export function createMessageRedactor(): MessageRedactor {
-  let pending = ""
-  let pendingMessageId: string | undefined
+// The text of one assistant message arrives in chunks, and a key can be split across them. This keeps, per message, the
+// unfinished tail of a possible key until the next chunk of the same message says what it was (or the message is
+// over), so no piece of a key is ever sent or stored. Other events in between (a tool call, a permission request)
+// are none of its business: the tail stays held.
+export interface MessageRedactor {
+  // The text that is safe to emit now (possibly empty) for a chunk of the message `messageId`.
+  push(messageId: string | undefined, text: string, secrets: readonly string[]): MessagePiece[]
+  // At a genuine boundary (the turn ended or was cancelled, the agent stopped): everything still held. A tail that
+  // starts like a key is redacted, whatever its length; any other tail is ordinary text and comes out as it is.
+  flushAll(secrets: readonly string[]): MessagePiece[]
+}
 
-  function release(secrets: readonly string[]): { messageId: string | undefined; text: string }[] {
-    if (pending === "") return []
-    const messageId = pendingMessageId
-    // A key prefix that never became a key and is long enough to say something about it: not worth the risk.
-    const text = /^sk-ant-[A-Za-z0-9_-]{8,}$/.test(pending) ? redactedMarker : redactText(pending, secrets)
-    pending = ""
-    return [{ messageId, text }]
+// A model that streams many messages without ever finishing a "possible key" can't grow this without bound.
+const maxHeldMessages = 8
+
+export function createMessageRedactor(): MessageRedactor {
+  const held = new Map<string, MessagePiece>()
+
+  function release(entry: MessagePiece, secrets: readonly string[]): MessagePiece[] {
+    const text = redactText(entry.text, secrets)
+    const looksLikeKey = text.startsWith(keyPrefix) || secrets.some((secret) => secret.length >= minSecretLength && secret.startsWith(text) && text.length >= minSecretLength)
+    return [{ messageId: entry.messageId, text: looksLikeKey ? redactedMarker : text }]
   }
 
   return {
     push(messageId, text, secrets) {
-      const out = messageId === pendingMessageId ? [] : release(secrets)
-      pendingMessageId = messageId
-      // The unfinished end is held raw: redacting a half-arrived key would swallow it and leak the rest.
-      const raw = pending + text
-      const held = heldSuffixLength(raw, secrets)
-      pending = raw.slice(raw.length - held)
-      const ready = redactText(raw.slice(0, raw.length - held), secrets)
+      const slot = messageId ?? ""
+      const out: MessagePiece[] = []
+      const raw = (held.get(slot)?.text ?? "") + text
+      held.delete(slot)
+      const keep = heldSuffixLength(raw, secrets)
+      const ready = redactText(raw.slice(0, raw.length - keep), secrets)
+      if (keep > 0) {
+        held.set(slot, { messageId, text: raw.slice(raw.length - keep) })
+        while (held.size > maxHeldMessages) {
+          const [oldest, entry] = held.entries().next().value as [string, MessagePiece]
+          held.delete(oldest)
+          out.push(...release(entry, secrets))
+        }
+      }
       if (ready !== "") out.push({ messageId, text: ready })
       return out
     },
-    flush: release,
+    flushAll(secrets) {
+      const out = [...held.values()].flatMap((entry) => release(entry, secrets))
+      held.clear()
+      return out
+    },
   }
 }

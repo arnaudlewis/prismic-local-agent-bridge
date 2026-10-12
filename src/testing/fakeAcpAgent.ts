@@ -149,13 +149,22 @@ function handlePrompt(message: Message): void {
     respond(message.id, { stopReason: "end_turn" })
     return
   }
-  if (text.startsWith("say-chunks ")) {
+  if (text.startsWith("say-chunks ") || text.startsWith("hold-after-chunks ")) {
+    const holds = text.startsWith("hold-after-chunks ")
     // "say-chunks <messageId> <chunk>|<chunk>|...": one message sent in pieces, like a model streaming a reply.
     const [, messageId = "", ...rest] = text.split(" ")
+    // "hold-after-chunks": the same, but the turn never ends (the daemon stops the agent).
     for (const piece of rest.join(" ").split("|")) {
+      // "@tool" is not text: another event of the turn (a tool call that starts, then finishes) in the middle of the message.
+      if (piece === "@tool") {
+        const toolCallId = `mid-${toolCounter++}`
+        notify({ sessionUpdate: "tool_call", toolCallId, title: "Run tool", status: "in_progress" })
+        notify({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" })
+        continue
+      }
       notify({ sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: piece } })
     }
-    respond(message.id, { stopReason: "end_turn" })
+    if (!holds) respond(message.id, { stopReason: "end_turn" })
     return
   }
   if (text.startsWith("echo-env ")) {

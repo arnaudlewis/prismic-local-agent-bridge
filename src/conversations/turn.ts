@@ -8,7 +8,7 @@ import type { Context } from "./context.ts"
 import { buildPreamble } from "./preamble.ts"
 import { attachWindow, getConversation } from "./registry.ts"
 import { refreshIdleTimer } from "./idle.ts"
-import { emit, flushSave, notify, pushThreads, record, redact, scheduleSave, setStatus } from "./output.ts"
+import { emit, flushHeldText, flushSave, notify, pushThreads, record, redact, scheduleSave, setStatus } from "./output.ts"
 import { cancelPendingPermissions } from "./stop.ts"
 import { readTurnContext } from "./turnContext.ts"
 
@@ -94,6 +94,7 @@ export async function handleChatPrompt(
     if (conversation.process === agent) emit(ctx, conversation, { type: "turn_end", stopReason: response.stopReason })
   } catch (error) {
     if (conversation.process === agent) {
+      flushHeldText(ctx, conversation)
       notify(ctx, conversation, "error", provider.describePromptError?.(error) ?? `Agent error: ${errorMessage(error)}`)
     }
   } finally {

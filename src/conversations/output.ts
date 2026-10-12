@@ -40,9 +40,18 @@ export function emit(ctx: Context, conversation: Conversation, event: RecordedBr
     for (const piece of redactor.push(event.messageId, event.text, secrets)) deliver(ctx, conversation, chunkOf(piece))
     return
   }
-  // Whatever an unfinished message was holding back comes out before the next event.
-  for (const piece of redactor.flush(secrets)) deliver(ctx, conversation, chunkOf(piece))
+  // Only the end of the turn is a boundary for held text: a tool call or a permission request in the middle of a
+  // message is not, and must not make a half-arrived key look finished.
+  if (event.type === "turn_end") flushHeldText(ctx, conversation)
   deliver(ctx, conversation, redactEvent(event, secrets))
+}
+
+// A genuine boundary (the turn ended, failed or was cancelled; the agent stopped): what the redactor still holds goes
+// out now, redacted if it starts like a key and as it is otherwise.
+export function flushHeldText(ctx: Context, conversation: Conversation): void {
+  const redactor = ctx.redactors.get(conversation.id)
+  if (redactor === undefined) return
+  for (const piece of redactor.flushAll(knownSecrets(ctx))) deliver(ctx, conversation, chunkOf(piece))
 }
 
 function chunkOf(piece: { messageId: string | undefined; text: string }): RecordedBridgeEvent {

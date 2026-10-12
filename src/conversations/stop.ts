@@ -1,7 +1,7 @@
 import type { ChildProcess } from "node:child_process"
 
 import type { Context } from "./context.ts"
-import { record } from "./output.ts"
+import { flushHeldText, record } from "./output.ts"
 import type { AgentFields, Conversation } from "./types.ts"
 
 const exitGraceMs = 3000
@@ -21,7 +21,8 @@ export function stopAgent(ctx: Context, conversation: Conversation): ChildProces
   // A child that is still handshaking isn't conversation.process yet, and must not outlive the stop.
   conversation.startingChild?.kill("SIGTERM")
   conversation.startingChild = undefined
-  // What an unfinished message was holding back belongs to the old agent.
+  // What an unfinished message was holding back is the last of the old agent: it comes out now, not never.
+  flushHeldText(ctx, conversation)
   ctx.redactors.delete(conversation.id)
   const agent = conversation.process
   conversation.process = undefined

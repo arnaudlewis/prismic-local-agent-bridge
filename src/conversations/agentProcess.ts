@@ -14,7 +14,7 @@ import { buildChildEnvironment } from "./childEnv.ts"
 import { providerOf } from "./context.ts"
 import type { Context } from "./context.ts"
 import { refreshIdleTimer } from "./idle.ts"
-import { notify, scheduleSave, setStatus } from "./output.ts"
+import { flushHeldText, notify, scheduleSave, setStatus } from "./output.ts"
 import { requestPermission } from "./permissions.ts"
 import { makeRoomForAgent } from "./registry.ts"
 import { applyInitialConfig, applySelectedConfig, sendAgentState } from "./sessionConfig.ts"
@@ -275,6 +275,7 @@ function handleAgentExit(ctx: Context, conversation: Conversation, child: ChildP
   if (agent?.child !== child) return
   conversation.process = undefined
   cancelPendingPermissions(ctx, conversation, agent)
+  flushHeldText(ctx, conversation)
   if (agent.turnActive) {
     notify(
       ctx,
