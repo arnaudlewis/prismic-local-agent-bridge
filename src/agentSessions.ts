@@ -32,6 +32,15 @@ const exitGraceMs = 3000
 const defaultIdleTtlMs = 6 * 60 * 60 * 1000
 const saveDebounceMs = 500
 const maxTrackedToolCalls = 512
+// Each agent is a child process holding a ChatGPT token: resident ones are bounded daemon-wide.
+const maxLiveAgents = 4
+const maxConversationsInMemory = 50
+// A conversation nobody is looking at must not run (or wait for an approval) forever.
+const detachedActivityLimitMs = 30 * 60 * 1000
+const detachedSweepIntervalMs = 60_000
+const cancelGraceMs = 60_000
+const maxPendingPermissions = 20
+const tooManyConversationsNotice = "Too many active conversations. Finish or reset one first."
 
 const authErrorNotices: Record<ChatGptAuthErrorCode, string> = {
   signed_out: "Sign in with ChatGPT to use the local agent.",
@@ -50,8 +59,12 @@ interface CreateAgentSessionsArgs {
   allowFullAccess: boolean
   // Overrides the codex-acp entry point; only tests pass it.
   agentBin?: string
-  // Overrides the idle TTL; only tests pass it.
+  // Override the idle TTL and the resource caps; only tests pass them.
   idleTtlMs?: number
+  maxLiveAgents?: number
+  maxConversations?: number
+  detachedActivityLimitMs?: number
+  detachedSweepIntervalMs?: number
   projectDir: string
   agentMode: AgentMode
   model: string | undefined
@@ -76,6 +89,7 @@ interface StartedWith {
 interface PendingPermission {
   resolve: (response: RequestPermissionResponse) => void
   optionIds: Set<string>
+  createdAt: number
 }
 
 interface AgentFields {
@@ -84,6 +98,9 @@ interface AgentFields {
   sessionId: string
   startedWith: StartedWith
   turnActive: boolean
+  turnStartedAt: number
+  // Set when a detached turn went over its limit and was cancelled; if it still hasn't ended, the agent is stopped.
+  cancelRequestedAt: number | undefined
   replaying: boolean
   preambleSent: boolean
   configOptions: SessionConfigOption[]
@@ -102,6 +119,10 @@ interface Conversation {
   // Survives agent restarts so the user's model and effort choices persist; only chat_reset clears it.
   selectedConfig: Record<string, string>
   ensuring: Promise<boolean> | undefined
+  // True while an agent is being spawned for it: it already counts as a live agent.
+  starting: boolean
+  // Monotonic activity tick, to find the least recently active conversation.
+  lastActiveAt: number
   // Bumped whenever the agent is stopped so an in-flight start can notice and abort.
   generation: number
   // Set once a prompt has been accepted: an agent that never got one has nothing to resume.
@@ -133,6 +154,10 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   const { channels, auth, dataDir, userCodexHome, allowFullAccess, agentBin, projectDir, agentMode, model, refreshMarginMs } =
     args
   const idleTtlMs = args.idleTtlMs ?? defaultIdleTtlMs
+  const liveAgentLimit = args.maxLiveAgents ?? maxLiveAgents
+  const conversationLimit = args.maxConversations ?? maxConversationsInMemory
+  const activityLimitMs = args.detachedActivityLimitMs ?? detachedActivityLimitMs
+  let activityTick = 0
   const conversations = new Map<string, Conversation>()
   const windowConversations = new Map<string, Conversation>()
   const store = createConversationStore({ dataDir })
@@ -153,8 +178,14 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
 
   // Everything the UI renders goes through here so a window that attaches later can replay it.
   function emit(conversation: Conversation, event: RecordedBridgeEvent): void {
+    touch(conversation)
     record(conversation, event)
     sendLive(conversation, event)
+  }
+
+  function touch(conversation: Conversation): void {
+    activityTick += 1
+    conversation.lastActiveAt = activityTick
   }
 
   function record(conversation: Conversation, event: HistoryEvent): void {
@@ -180,6 +211,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       existing.repository = session.repository
       return existing
     }
+    makeRoomInMemory()
     const stored = store.load(session.conversationId)
     const transcript = createTranscript({ events: stored?.events })
     // The agent that was waiting on these is gone, so they can't be answered anymore.
@@ -193,6 +225,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       agent: undefined,
       selectedConfig: {},
       ensuring: undefined,
+      starting: false,
+      lastActiveAt: 0,
       generation: 0,
       resumeSessionId: stored?.acpSessionId,
       transcript,
@@ -200,9 +234,84 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       saveTimer: undefined,
       idleTimer: undefined,
     }
+    touch(conversation)
     conversations.set(conversation.id, conversation)
     return conversation
   }
+
+  // Detached conversations without an agent only cost memory: drop them (they stay on disk) to bound the map.
+  function makeRoomInMemory(): void {
+    while (conversations.size >= conversationLimit) {
+      const victim = leastRecentlyActive(
+        [...conversations.values()].filter(
+          (candidate) =>
+            candidate.windowId === undefined &&
+            candidate.agent === undefined &&
+            !candidate.starting &&
+            candidate.ensuring === undefined,
+        ),
+      )
+      if (victim === undefined) return
+      evict(victim)
+    }
+  }
+
+  // Stops the least recently active agent nobody is looking at, if it is idle, until there is room for one more.
+  function makeRoomForAgent(requester: Conversation): boolean {
+    while (countLiveAgents(requester) >= liveAgentLimit) {
+      const victim = leastRecentlyActive(
+        [...conversations.values()].filter(
+          (candidate) =>
+            candidate !== requester &&
+            candidate.agent !== undefined &&
+            candidate.windowId === undefined &&
+            !candidate.agent.turnActive &&
+            candidate.agent.pendingPermissions.size === 0,
+        ),
+      )
+      if (victim === undefined) return false
+      stopAgent(victim)
+      flushSave(victim)
+      refreshIdleTimer(victim)
+    }
+    return true
+  }
+
+  function countLiveAgents(except: Conversation): number {
+    let count = 0
+    for (const candidate of conversations.values()) {
+      if (candidate !== except && (candidate.agent !== undefined || candidate.starting)) count += 1
+    }
+    return count
+  }
+
+  function sweepDetachedConversations(): void {
+    const now = Date.now()
+    for (const conversation of conversations.values()) {
+      const agent = conversation.agent
+      if (agent === undefined || conversation.windowId !== undefined) continue
+      const turnTooLong = agent.turnActive && now - agent.turnStartedAt > activityLimitMs
+      const permissionTooOld = [...agent.pendingPermissions.values()].some(
+        (pending) => now - pending.createdAt > activityLimitMs,
+      )
+      if (!turnTooLong && !permissionTooOld) continue
+      if (agent.cancelRequestedAt === undefined) {
+        agent.cancelRequestedAt = now
+        cancelPendingPermissions(conversation, agent)
+        agent.connection.cancel({ sessionId: agent.sessionId }).catch((error: unknown) => {
+          console.warn(`Could not cancel a detached turn: ${errorMessage(error)}`)
+        })
+      } else if (now - agent.cancelRequestedAt > cancelGraceMs) {
+        notify(conversation, "error", "The local agent was stopped because it didn't finish after being cancelled.")
+        stopAgent(conversation)
+        scheduleSave(conversation)
+        refreshIdleTimer(conversation)
+      }
+    }
+  }
+
+  const sweepTimer = setInterval(sweepDetachedConversations, args.detachedSweepIntervalMs ?? detachedSweepIntervalMs)
+  sweepTimer.unref()
 
   function attachWindow(conversation: Conversation, windowId: string): void {
     const previous = windowConversations.get(windowId)
@@ -215,6 +324,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     }
     conversation.windowId = windowId
     windowConversations.set(windowId, conversation)
+    touch(conversation)
     refreshIdleTimer(conversation)
   }
 
@@ -363,6 +473,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     record(conversation, { type: "user_message", text: message.text })
     conversation.resumeSessionId = agent.sessionId
     agent.turnActive = true
+    agent.turnStartedAt = Date.now()
+    agent.cancelRequestedAt = undefined
     clearTimeout(conversation.idleTimer)
     setStatus(conversation, "running")
     try {
@@ -512,6 +624,14 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const stopped = stopAgent(conversation)
     if (stopped !== undefined) await waitForExit(stopped)
 
+    if (!makeRoomForAgent(conversation)) {
+      notify(conversation, "error", tooManyConversationsNotice)
+      setStatus(conversation, "idle")
+      return false
+    }
+
+    // Set in the same tick as the cap check above, so concurrent starts can't all pass it.
+    conversation.starting = true
     try {
       await startAgent({ conversation, windowId, session, accessToken, startedWith })
       return true
@@ -520,6 +640,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       notify(conversation, "error", `Couldn't start the local agent: ${errorMessage(error)}`)
       setStatus(conversation, "idle")
       return false
+    } finally {
+      conversation.starting = false
     }
   }
 
@@ -546,11 +668,20 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     })
     child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
     child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
-    child.on("exit", (code) => handleAgentExit({ conversation, child, code }))
+    child.on("exit", (code) => {
+      if (conversation.generation === generation) handleAgentExit({ conversation, child, code })
+    })
 
+    // An agent that was stopped or reset may still talk for a while (or ignore SIGTERM): everything it sends after
+    // that must neither reach the transcript, nor the disk, nor wait for an answer nobody can give.
     const client: Client = {
-      requestPermission: (params) => requestPermission(conversation, agent, params),
-      sessionUpdate: (notification) => handleSessionUpdate(conversation, agent, notification),
+      requestPermission: (params) =>
+        conversation.generation === generation
+          ? requestPermission(conversation, agent, params)
+          : Promise.resolve<RequestPermissionResponse>({ outcome: { outcome: "cancelled" } }),
+      sessionUpdate: (notification) => {
+        if (conversation.generation === generation) handleSessionUpdate(conversation, agent, notification)
+      },
     }
     // Node's web stream typings and the SDK's DOM-based ones disagree on the buffer type; the runtime objects are compatible.
     const input = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>
@@ -561,6 +692,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       sessionId: "",
       startedWith,
       turnActive: false,
+      turnStartedAt: 0,
+      cancelRequestedAt: undefined,
       replaying: false,
       preambleSent: false,
       configOptions: [],
@@ -662,11 +795,15 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     agent: AgentFields,
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
+    if (agent.pendingPermissions.size >= maxPendingPermissions) {
+      return Promise.resolve({ outcome: { outcome: "cancelled" } })
+    }
     const requestId = randomUUID()
     return new Promise((resolve) => {
       agent.pendingPermissions.set(requestId, {
         resolve,
         optionIds: new Set(params.options.map((option) => option.optionId)),
+        createdAt: Date.now(),
       })
       emit(conversation, {
         type: "permission_request",
@@ -785,6 +922,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function stopAll(): void {
+    clearInterval(sweepTimer)
     for (const conversation of conversations.values()) stopConversation(conversation)
     conversations.clear()
     windowConversations.clear()
@@ -803,6 +941,14 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   channels.onWindowClosed(detachWindow)
 
   return { handleMessage, detachWindow, stopAll }
+}
+
+function leastRecentlyActive(candidates: Conversation[]): Conversation | undefined {
+  let oldest: Conversation | undefined
+  for (const candidate of candidates) {
+    if (oldest === undefined || candidate.lastActiveAt < oldest.lastActiveAt) oldest = candidate
+  }
+  return oldest
 }
 
 function sameStartedWith(a: StartedWith, b: StartedWith): boolean {

@@ -77,6 +77,14 @@ A conversation is identified by a `conversationId` (a lowercase UUID v4 the brow
 - **TTL:** a conversation with no window attached and no turn running is stopped after 6 hours (it stays on disk). Files older than 30 days are deleted at startup.
 - **Reset:** `chat_reset` stops the agent and deletes the transcript, the stored session and the file. The next `chat_open` starts a fresh conversation, with a new preamble.
 
+### Limits
+
+- **Resident agents:** at most 4 agents run at once, daemon-wide. To start another, the bridge stops the least recently active agent that no window is attached to and that has no turn running and no pending permission request (its conversation stays on disk and resumes later with `session/load`). If there is none, the new conversation gets the notice "Too many active conversations. Finish or reset one first.". At most 50 conversations are kept in memory; detached ones without an agent are dropped from memory (not from disk).
+- **Detached work:** a conversation with no window attached whose turn has run for more than 30 minutes, or whose permission request has gone unanswered for 30 minutes, is cancelled (and its agent stopped if the cancel isn't honored within a minute).
+- **Input sizes:** repository 200 characters, prompt 20000, document id and title 300, MCP URL 2048, Prismic token 8192, config values and permission ids 200. WebSocket frames over 256 KiB close the connection.
+- **Transcript:** a single event's text is cut at 100000 characters with a visible `…[truncated]` marker (merged agent text too), at most 20 permission requests per agent can wait at once (further ones are cancelled), and the size cap counts bytes. A stored file is read only if it is a regular file of at most 4 MiB and passes the schema bounds, otherwise it is ignored with a warning.
+- **Stale agents:** once an agent was stopped or its conversation reset, anything it still sends is ignored (its permission requests are answered as cancelled), so a reset conversation can't come back from a late message. A replaced WebSocket stops being listened to as soon as its replacement attaches.
+
 The transcript contains your prompts and the agent's replies and tool titles in plain text: treat the `conversations/` directory as private.
 
 ## Structured editor context

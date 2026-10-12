@@ -1,4 +1,5 @@
 // Minimal stand-in for codex-acp used by agentSessions tests: speaks newline-delimited JSON-RPC on stdio.
+import { appendFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 
 const modeValues = ["read-only", "workspace-write", "agent", "agent-full-access"]
@@ -79,9 +80,53 @@ function chunk(text: string): void {
   notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } })
 }
 
+function log(line: string): void {
+  if (process.env.FAKE_AGENT_LOG !== undefined) appendFileSync(process.env.FAKE_AGENT_LOG, `${line}\n`)
+}
+
+// Simulates an agent that keeps talking after the bridge stopped it: it ignores SIGTERM, then sends text and a
+// permission request, and logs how the bridge answered. It exits by itself shortly after.
+function misbehave(): void {
+  process.on("SIGTERM", () => {})
+  setTimeout(() => process.exit(0), 3000).unref()
+  setTimeout(() => {
+    chunk("late-text")
+    write({
+      jsonrpc: "2.0",
+      id: "perm-late",
+      method: "session/request_permission",
+      params: {
+        sessionId: "fake-session",
+        toolCall: { toolCallId: "late-tool", title: "Late tool" },
+        options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+      },
+    })
+  }, 300)
+}
+
 function handlePrompt(message: Message): void {
   const blocks = message.params?.prompt ?? []
   const text = blocks.at(-1)?.text ?? ""
+  if (text.includes("flood-permissions")) {
+    heldPromptId = message.id
+    for (let index = 0; index < 25; index++) {
+      write({
+        jsonrpc: "2.0",
+        id: `perm-f-${index}`,
+        method: "session/request_permission",
+        params: {
+          sessionId: "fake-session",
+          toolCall: { toolCallId: `flood-${index}`, title: `Flood ${index}` },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        },
+      })
+    }
+    return
+  }
+  if (text.includes("late-output")) {
+    misbehave()
+    return
+  }
   if (text.includes("hold")) {
     chunk("working")
     heldPromptId = message.id
@@ -173,7 +218,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       heldPromptId = undefined
       break
     default:
-      if (message.method === undefined && message.id === "perm-1") {
+      if (message.method === undefined && typeof message.id === "string" && message.id.startsWith("perm-f-")) {
+        log(`flood:${message.result?.outcome?.outcome}`)
+      } else if (message.method === undefined && message.id === "perm-late") {
+        log(`late-permission:${message.result?.outcome?.outcome}`)
+        process.exit(0)
+      } else if (message.method === undefined && message.id === "perm-1") {
         const outcome = message.result?.outcome
         chunk(`permission:${outcome?.outcome === "selected" ? outcome.optionId : outcome?.outcome}`)
         respond(permissionPromptId, { stopReason: "end_turn" })

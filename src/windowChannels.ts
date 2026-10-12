@@ -50,9 +50,16 @@ export function createWindowChannels(): WindowChannels {
       }
       const previous = sockets.get(windowId)
       sockets.set(windowId, socket)
-      previous?.close(4000, "replaced")
+      if (previous !== undefined) {
+        // A replaced socket must not keep driving the session until it finishes closing.
+        previous.removeAllListeners("message")
+        previous.removeAllListeners("close")
+        previous.on("error", () => {})
+        previous.close(4000, "replaced")
+      }
 
       socket.on("message", (data, isBinary) => {
+        if (sockets.get(windowId) !== socket) return
         if (isBinary) {
           console.warn(`Ignored binary message from window ${windowId}`)
           return

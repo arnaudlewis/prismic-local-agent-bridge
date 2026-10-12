@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
@@ -80,5 +80,43 @@ describe("createConversationStore", () => {
 
     expect(existsSync(join(dataDir, "conversations", `${conversationId}.json`))).toBe(false)
     expect(existsSync(join(dataDir, "conversations", `${recentId}.json`))).toBe(true)
+  })
+
+  it("ignores a file over 4 MiB without parsing it", () => {
+    const { dataDir, store } = createStore()
+    mkdirSync(join(dataDir, "conversations"), { recursive: true })
+    writeFileSync(join(dataDir, "conversations", `${conversationId}.json`), `${JSON.stringify(stored())}${" ".repeat(4 * 1024 * 1024)}`)
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    expect(store.load(conversationId)).toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it("ignores a symlink even when it points at a valid conversation", () => {
+    const { dataDir, store } = createStore()
+    store.save(stored())
+    const real = join(dataDir, "conversations", `${conversationId}.json`)
+    const otherId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    symlinkSync(real, join(dataDir, "conversations", `${otherId}.json`))
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    expect(store.load(otherId)).toBeUndefined()
+    warn.mockRestore()
+  })
+
+  it("ignores a file whose events exceed the schema bounds, without logging its content", () => {
+    const { dataDir, store } = createStore()
+    mkdirSync(join(dataDir, "conversations"), { recursive: true })
+    const oversized = { ...stored(), events: [{ type: "user_message", text: "SECRET".repeat(30_000) }] }
+    const tooMany = { ...stored(), events: Array.from({ length: 5001 }, () => ({ type: "turn_end", stopReason: "end_turn" })) }
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    for (const file of [oversized, tooMany]) {
+      writeFileSync(join(dataDir, "conversations", `${conversationId}.json`), JSON.stringify(file))
+      expect(store.load(conversationId)).toBeUndefined()
+    }
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("SECRET")
+    warn.mockRestore()
   })
 })

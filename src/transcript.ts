@@ -2,6 +2,11 @@ import type { HistoryEvent } from "./protocol.ts"
 
 export const maxTranscriptEvents = 3000
 export const maxTranscriptBytes = 2 * 1024 * 1024
+// A single event can't take a meaningful part of the log, and what is stored must stay loadable.
+export const maxEventTextLength = 100_000
+export const maxEventIdLength = 1000
+export const maxPermissionOptions = 20
+const truncationMarker = "…[truncated]"
 
 interface TranscriptLimits {
   maxEvents: number
@@ -27,11 +32,14 @@ export function createTranscript(args: CreateTranscriptArgs = {}): Transcript {
   let totalBytes = 0
   const unresolved = new Set<string>()
 
-  function append(event: HistoryEvent): void {
+  function append(rawEvent: HistoryEvent): void {
+    const event = boundEvent(rawEvent)
     const last = events.at(-1)
     if (event.type === "agent_message_chunk" && last?.type === "agent_message_chunk" && last.messageId === event.messageId) {
-      const merged: HistoryEvent = { ...last, text: last.text + event.text }
-      replaceLast(merged)
+      // Once truncated, the rest of the message is dropped: nothing more can be added.
+      if (!last.text.endsWith(truncationMarker) || last.text.length < maxEventTextLength) {
+        replaceLast({ ...last, text: truncateText(last.text + event.text) })
+      }
     } else {
       push(event)
     }
@@ -41,14 +49,14 @@ export function createTranscript(args: CreateTranscriptArgs = {}): Transcript {
   }
 
   function push(event: HistoryEvent): void {
-    const size = JSON.stringify(event).length
+    const size = byteSize(event)
     events.push(event)
     sizes.push(size)
     totalBytes += size
   }
 
   function replaceLast(event: HistoryEvent): void {
-    const size = JSON.stringify(event).length
+    const size = byteSize(event)
     totalBytes += size - (sizes.at(-1) ?? 0)
     events[events.length - 1] = event
     sizes[sizes.length - 1] = size
@@ -94,5 +102,57 @@ export function createTranscript(args: CreateTranscriptArgs = {}): Transcript {
       unresolved.clear()
     },
     unresolvedPermissionIds: () => [...unresolved],
+  }
+}
+
+function byteSize(event: HistoryEvent): number {
+  return Buffer.byteLength(JSON.stringify(event))
+}
+
+function truncateText(text: string, maxLength = maxEventTextLength): string {
+  if (text.length <= maxLength) return text
+  return text.slice(0, maxLength - truncationMarker.length) + truncationMarker
+}
+
+function boundId(id: string): string {
+  return id.slice(0, maxEventIdLength)
+}
+
+// Keeps every field within the bounds the stored-conversation schema enforces on load.
+function boundEvent(event: HistoryEvent): HistoryEvent {
+  switch (event.type) {
+    case "user_message":
+    case "notice":
+      return { ...event, text: truncateText(event.text) }
+    case "agent_message_chunk":
+      return {
+        ...event,
+        text: truncateText(event.text),
+        ...(event.messageId === undefined ? {} : { messageId: boundId(event.messageId) }),
+      }
+    case "tool_call":
+      return { ...event, toolCallId: boundId(event.toolCallId), title: truncateText(event.title) }
+    case "tool_call_update":
+      return {
+        ...event,
+        toolCallId: boundId(event.toolCallId),
+        ...(event.title === undefined ? {} : { title: truncateText(event.title) }),
+      }
+    case "permission_request":
+      return {
+        ...event,
+        title: truncateText(event.title),
+        options: event.options.slice(0, maxPermissionOptions).map((option) => ({
+          optionId: boundId(option.optionId),
+          name: boundId(option.name),
+          kind: boundId(option.kind),
+        })),
+      }
+    case "permission_resolved":
+      return event.optionId === undefined ? event : { ...event, optionId: boundId(event.optionId) }
+    case "turn_end":
+      return { ...event, stopReason: boundId(event.stopReason) }
+    case "editor_context":
+      return { ...event, toolCallId: boundId(event.toolCallId) }
   }
 }

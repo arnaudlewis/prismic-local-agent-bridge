@@ -1,4 +1,14 @@
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
 
@@ -6,13 +16,15 @@ import { HistoryEventSchema, conversationIdPattern } from "./protocol.ts"
 
 const maxFileAgeMs = 30 * 24 * 60 * 60 * 1000
 
+const maxStoredFileBytes = 4 * 1024 * 1024
+
 const StoredConversationSchema = z.object({
   version: z.literal(1),
-  conversationId: z.string(),
-  repository: z.string(),
-  acpSessionId: z.string().optional(),
+  conversationId: z.string().max(36),
+  repository: z.string().max(200),
+  acpSessionId: z.string().max(1000).optional(),
   updatedAt: z.number(),
-  events: z.array(HistoryEventSchema),
+  events: z.array(HistoryEventSchema).max(5000),
 })
 
 export type StoredConversation = z.infer<typeof StoredConversationSchema>
@@ -42,6 +54,12 @@ export function createConversationStore(args: { dataDir: string }): Conversation
       const path = pathFor(conversationId)
       let raw: string
       try {
+        // Only a plain, reasonably small file is read: no symlink, FIFO or oversized file gets parsed.
+        const info = lstatSync(path)
+        if (!info.isFile() || info.size > maxStoredFileBytes) {
+          console.warn(`Ignoring conversation ${conversationId}: not a regular file or too large`)
+          return undefined
+        }
         raw = readFileSync(path, "utf8")
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

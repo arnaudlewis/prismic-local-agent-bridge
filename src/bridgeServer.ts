@@ -22,6 +22,8 @@ import type { WindowChannels } from "./windowChannels.ts"
 
 const windowPathPattern = new RegExp(`^/windows/(${windowIdPattern.source.slice(1, -1)})$`, "i")
 
+const maxWebSocketPayloadBytes = 256 * 1024
+
 const PairBodySchema = z.object({ code: z.string() })
 
 interface StartBridgeServerArgs {
@@ -127,7 +129,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     })
   })
 
-  const wss = new WebSocketServer({ noServer: true })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: maxWebSocketPayloadBytes })
 
   function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
     socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`)
