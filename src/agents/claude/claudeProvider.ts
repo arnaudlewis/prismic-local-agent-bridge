@@ -1,5 +1,5 @@
 import { AgentAuthError } from "../provider.ts"
-import type { AgentProvider } from "../provider.ts"
+import type { AgentCredentials, AgentProvider } from "../provider.ts"
 import type { AgentRuntime } from "../agentRuntime.ts"
 import type { ApiKeyVault } from "../../secrets/apiKeyVault.ts"
 import { blockedCommands, commandNameCandidates, hiddenCommands, nativeCommandName } from "./commands.ts"
@@ -20,6 +20,8 @@ export interface ClaudeProviderArgs {
   agentBin?: string
   // Downloads the Claude Code binary on first use; absent when node_modules has it.
   runtime?: AgentRuntime
+  // Demo only (--claude-code-login): run with the Claude Code login of this computer instead of an API key.
+  useClaudeCodeLogin?: boolean
   // Replaces the request to Anthropic that checks a new key; only tests pass it.
   validateKey?: KeyValidator
   now?: () => number
@@ -29,8 +31,11 @@ export interface ClaudeProviderArgs {
 // no "Sign in with Claude" for third-party apps, and the user's claude.ai subscription must never be used: the agent
 // runs with an API key in its environment (which outranks any stored login), with --hide-claude-auth (which makes it
 // refuse a session a subscription would pay for) and, by default, in an empty configuration directory of its own.
+// The one exception is the demo mode (useClaudeCodeLogin), which is never the default and runs the user's own Claude
+// Code login: Anthropic's terms don't allow a subscription in third-party apps, so it is for demonstrations only.
 export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
   const { dataDir, vault, userClaudeHome, agentBin, runtime } = args
+  const useClaudeCodeLogin = args.useClaudeCodeLogin === true
   const removedListeners: Array<(notice: string) => void> = []
 
   const routes = createKeyRoutes({
@@ -58,7 +63,8 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     credentialEpoch: () => vault.credentialEpoch(),
     secretValues: () => vault.knownKeys(),
 
-    async authenticate() {
+    async authenticate(): Promise<AgentCredentials> {
+      if (useClaudeCodeLogin) return { fingerprint: "claude-code-login", env: {} }
       // Before reading the key, never after: a key that changes in between must read as stale, not as fresh.
       const epoch = vault.credentialEpoch()
       const found = await vault.get()
@@ -68,6 +74,19 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     },
 
     spawnSpec() {
+      if (useClaudeCodeLogin) {
+        return {
+          command: process.execPath,
+          args: [agentBin ?? resolveClaudeAcpBin()],
+          env: {
+            // Without a directory of its own, Claude Code looks for its login where `claude` put it.
+            ...(userClaudeHome === undefined ? {} : { CLAUDE_CONFIG_DIR: userClaudeHome }),
+            NO_BROWSER: "1",
+            DISABLE_AUTOUPDATER: "1",
+            ...runtime?.env(),
+          },
+        }
+      }
       const configDir = userClaudeHome ?? ensureIsolatedClaudeHome(dataDir)
       return {
         command: process.execPath,
@@ -88,6 +107,9 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
 
     describePromptError(error) {
       const message = error instanceof Error ? error.message : String(error)
+      if (useClaudeCodeLogin && /authentication required|authentication_error|not logged in|please run \/login/i.test(message)) {
+        return "Claude Code isn't signed in on this computer. Run claude in a terminal, sign in with /login, then try again."
+      }
       // claude-agent-acp answers a rejected key (or a signed-out CLI) with an "Authentication required" error.
       if (/authentication required|invalid x-api-key|authentication_error|invalid api key/i.test(message)) {
         return "Anthropic rejected the API key. Check it in the Claude settings, or replace it."
@@ -99,6 +121,7 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     },
 
     async getStatus() {
+      if (useClaudeCodeLogin) return { account: { kind: "apiKey", status: "configured", storage: "claude_code" } }
       const status = await vault.status()
       return {
         account: {
@@ -112,6 +135,12 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     },
 
     async bannerLines() {
+      if (useClaudeCodeLogin) {
+        return [
+          "Claude: the Claude Code login of this computer (demo mode: a subscription is not meant for third-party apps)",
+          `Claude config: ${userClaudeHome ?? "Claude Code's default directory"} (the Claude Code login is used, not an API key)`,
+        ]
+      }
       const status = await vault.status()
       const key = status.error !== undefined
         ? status.error

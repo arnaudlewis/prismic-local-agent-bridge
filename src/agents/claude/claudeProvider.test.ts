@@ -210,6 +210,35 @@ describe("claude provider", () => {
   })
 })
 
+describe("claude provider with the Claude Code login (demo mode)", () => {
+  function createWithLogin() {
+    const dataDir = mkdtempSync(join(tmpdir(), "bridge-claude-login-"))
+    const vault = createApiKeyVault({ store: createMemorySecretStore(key), env: () => undefined })
+    const provider = createClaudeProvider({ dataDir, vault, userClaudeHome: undefined, useClaudeCodeLogin: true })
+    return { dataDir, provider }
+  }
+
+  it("needs no key, and hands the child neither a key, an isolated config dir nor --hide-claude-auth", async () => {
+    const { provider, dataDir } = createWithLogin()
+
+    const credentials = await provider.authenticate()
+    const spec = provider.spawnSpec({ projectDir: "/tmp" })
+
+    expect(credentials.env).toEqual({})
+    expect(JSON.stringify(spec)).not.toContain(key)
+    expect(spec.args).toHaveLength(1)
+    expect(spec.env).toEqual({ NO_BROWSER: "1", DISABLE_AUTOUPDATER: "1" })
+    expect(existsSync(join(dataDir, "claude-home"))).toBe(false)
+  })
+
+  it("reports itself as configured so the browser never asks for a key, and explains a signed-out Claude Code", async () => {
+    const { provider } = createWithLogin()
+
+    expect((await provider.getStatus()).account).toEqual({ kind: "apiKey", status: "configured", storage: "claude_code" })
+    expect(provider.describePromptError?.(new Error("Authentication required"))).toMatch(/Claude Code isn't signed in/)
+  })
+})
+
 describe("claude commands", () => {
   it.each(["login", "logout", "config", "permissions", "update-config", "fewer-permission-prompts", "auto-mode-setup", "goal", "loop", "add-dir", "agents", "plugin", "reload-plugins", "design-consent", "clear", "resume"])(
     "blocks /%s",

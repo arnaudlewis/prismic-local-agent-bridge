@@ -166,7 +166,8 @@ export type AgentAccountStatus =
       // "…abcd": the last 4 characters of the key.
       keyHint?: string
       // Where the key is (or would be) kept. "env" means ANTHROPIC_API_KEY on the daemon: read-only for the browser.
-      storage: "keychain" | "file" | "env"
+      // "claude_code" is the demo mode (--claude-code-login): no key, the Claude Code login of the computer is used.
+      storage: "keychain" | "file" | "env" | "claude_code"
       error?: string
     }
 

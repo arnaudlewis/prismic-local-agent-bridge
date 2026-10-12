@@ -77,6 +77,7 @@ async function main(): Promise<void> {
         await createDefaultSecretStores({ dataDir, name: "claude-api-key", label: "Anthropic API key" }),
       ),
       userClaudeHome,
+      useClaudeCodeLogin: options.claudeCodeLogin,
       runtime: createAgentRuntime({ dataDir, rootDir: daemonRootDir, ...claudeRuntimeArgs() }),
     }),
   ]
@@ -161,6 +162,7 @@ interface CliOptions {
   agentMode: AgentMode
   useUserCodex: boolean
   useUserClaude: boolean
+  claudeCodeLogin: boolean
   passEnv: string[]
   forgetPairings: boolean
   signOutPrismic: boolean
@@ -177,6 +179,7 @@ function parseOptions(): CliOptions {
       "agent-mode": { type: "string" },
       "use-user-codex": { type: "boolean" },
       "use-user-claude": { type: "boolean" },
+      "claude-code-login": { type: "boolean" },
       "forget-pairings": { type: "boolean" },
       "sign-out-prismic": { type: "boolean" },
       "pass-env": { type: "string", multiple: true },
@@ -219,6 +222,7 @@ function parseOptions(): CliOptions {
     agentMode,
     useUserCodex: values["use-user-codex"] ?? false,
     useUserClaude: values["use-user-claude"] ?? false,
+    claudeCodeLogin: values["claude-code-login"] ?? false,
     forgetPairings: values["forget-pairings"] ?? false,
     signOutPrismic: values["sign-out-prismic"] ?? false,
     passEnv,
