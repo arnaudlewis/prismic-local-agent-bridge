@@ -11,7 +11,7 @@ import { resolveUserCodexHome } from "./agents/codex/codexConfig.ts"
 import { createCodexProvider } from "./agents/codex/codexProvider.ts"
 import { agentModes } from "./agents/codex/modes.ts"
 import type { AgentMode } from "./agents/codex/modes.ts"
-import type { AgentProvider } from "./agents/provider.ts"
+import type { AgentProvider, AgentSignInResult } from "./agents/provider.ts"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { connectRateLimit, connectRoutes } from "./connect/connectRoutes.ts"
@@ -136,6 +136,24 @@ async function main(): Promise<void> {
     }, signInPollMs)
     timer.unref()
   })
+  // The demo mode's Claude Code login: the app asks for it right after enabling the mode. `claude auth login` opens
+  // the browser by itself, so the answer only comes once the user is done there (or it failed, or timed out).
+  let signingInToClaude = false
+  process.on("message", (message) => {
+    if (!isClaudeSignInRequest(message) || signingInToClaude) return
+    signingInToClaude = true
+    const claude = providers.find((provider) => provider.id === "claude")
+    const signedIn: Promise<AgentSignInResult> =
+      claude?.signIn?.(accountsAbort.signal) ??
+      Promise.resolve({ status: "failed", reason: "The Claude Code login isn't enabled." })
+    void signedIn.then((result) => {
+      signingInToClaude = false
+      // Aborted at shutdown: nobody is listening for the answer.
+      if (accountsAbort.signal.aborted) return
+      if (process.connected) process.send?.({ type: "sign_in_result", account: "claude", ...result })
+      publishAccounts()
+    })
+  })
   const upstream = createMcpUpstream({ auth: prismicAuth })
   const grants = createAgentMcpGrants()
   const agents = createAgentSessions({
@@ -256,6 +274,12 @@ function readSignOutRequest(message: unknown): "prismic" | "chatgpt" | undefined
 function isChatGptSignInRequest(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false
   return "type" in message && message.type === "sign_in" && "account" in message && message.account === "chatgpt"
+}
+
+// A message of the desktop app asking to sign the Claude Code login in (desktop/src/bridgeProcess.ts).
+function isClaudeSignInRequest(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false
+  return "type" in message && message.type === "sign_in" && "account" in message && message.account === "claude"
 }
 
 interface CliOptions {

@@ -6,7 +6,7 @@ import type { AgentCredentials, AgentProvider } from "../provider.ts"
 import type { AgentRuntime } from "../agentRuntime.ts"
 import type { ApiKeyVault } from "../../secrets/apiKeyVault.ts"
 import { blockedCommands, commandNameCandidates, hiddenCommands, nativeCommandName } from "./commands.ts"
-import { describeClaudeCodeLogin } from "./claudeCodeLogin.ts"
+import { describeClaudeCodeLogin, signInToClaudeCode } from "./claudeCodeLogin.ts"
 import { ensureIsolatedClaudeHome, isolatedClaudeHomePath, resolveClaudeAcpBin } from "./claudeConfig.ts"
 import { createKeyRoutes } from "./keyRoutes.ts"
 import { validateKeyWithAnthropic } from "./keyValidation.ts"
@@ -145,6 +145,19 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
       }
       const status = await vault.status()
       return status.configured ? `Claude: API key ${status.keyHint ?? "configured"}` : "Claude: no API key yet"
+    },
+
+    // Only the demo mode has a login of its own to start; with an API key there is nothing to sign in to.
+    async signIn(signal) {
+      if (!useClaudeCodeLogin) return { status: "failed", reason: "The Claude Code login isn't enabled." }
+      try {
+        // The packaged app downloads Claude Code on first use: the login needs that very binary.
+        await runtime?.ensure()
+      } catch (error) {
+        const why = error instanceof Error ? error.message : "no network?"
+        return { status: "failed", reason: `Couldn't download Claude Code: ${why}` }
+      }
+      return signInToClaudeCode({ binaryPath: runtime?.binaryPath(), configDir: userClaudeHome, signal })
     },
 
     async bannerLines() {

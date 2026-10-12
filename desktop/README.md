@@ -147,8 +147,11 @@ Account lines are collected one at a time and at least 5 seconds apart, and abor
 **Claude Code demo mode.** The menu item runs the daemon with `--claude-code-login`: Claude uses the Claude Code
 login of this Mac instead of an Anthropic API key, and the Page Builder stops asking for a key. It is for demos only:
 Anthropic's terms do not allow a Claude subscription in third-party apps. Enabling it asks for confirmation and
-restarts the daemon. It needs Claude Code signed in with the default configuration (`claude`, then `/login`, without
-setting `CLAUDE_CONFIG_DIR`). Check with the program the daemon uses:
+restarts the daemon, which then checks `claude auth status`: when Claude Code isn't signed in on this Mac, it runs
+`claude auth login --claudeai`, which opens your browser to sign in with your Claude account. If that fails or isn't
+finished within 5 minutes, the option goes back to off and a dialog says why. Turning the option off while the browser
+is open stops the sign-in. It signs in with the default configuration (without `CLAUDE_CONFIG_DIR`). Check with
+the program the daemon uses:
 
 ```sh
 env -i PATH=/usr/bin:/bin HOME=$HOME USER=$USER LOGNAME=$LOGNAME SHELL=$SHELL TMPDIR=$TMPDIR \
@@ -261,7 +264,7 @@ apps that already saw it will not offer it again.
 | Red icon, "restarting"                               | Open **Show Logs** and read the end of `bridge.log`.                                                    |
 | Orange icon that stays orange                        | No Page Builder is connected: open the agent panel and click Connect. Check it runs on an allowed origin. |
 | The panel offers to install the app                  | The app is not running, or the browser blocks the request (Safari on https). Open the app, and click Allow if the browser asks. |
-| "Claude Code isn't signed in on this computer"       | Demo mode only. Run `claude`, then `/login`, then check with the `auth status` command above.            |
+| "Claude Code isn't signed in on this computer"       | Demo mode only. Turn the option off and on again to open the sign-in, or run `claude`, then `/login`, then check with the `auth status` command above. |
 | "Couldn't download Codex/Claude"                     | No network, or a proxy. The error says why; send another message to try again.                          |
 | "Couldn't check for updates: HTTP 404"               | The repository is private, or no release exists yet.                                                    |
 | macOS says the app is damaged or from an unidentified developer | See "Open an unsigned app".                                                                  |

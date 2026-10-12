@@ -52,6 +52,8 @@ function run(): void {
   })
 
   app.on("before-quit", (event) => {
+    // Stopping the daemon ends a pending Claude sign-in as failed: that is not a failure to roll back.
+    claudeToggleCount += 1
     if (bridge.isStopped()) return
     event.preventDefault()
     void bridge.stop().then(() => app.quit())
@@ -169,15 +171,19 @@ function run(): void {
     if (response === 0) void shell.openExternal(result.update.downloadUrl)
   }
 
+  // Bumped at every toggle: the answer of a sign-in the user has since turned off (or off and on again) is not theirs.
+  let claudeToggleCount = 0
+
   async function toggleClaudeCodeLogin(): Promise<void> {
     if (state === undefined) return
-    if (state.get().claudeCodeLogin !== true) {
+    const isEnabling = state.get().claudeCodeLogin !== true
+    if (isEnabling) {
       const { response } = await dialog.showMessageBox({
         type: "warning",
         message: "Use your Claude Code subscription?",
         detail:
           "For demos only. Anthropic's terms don't allow a Claude subscription in third-party apps. " +
-          "Claude Code must already be signed in on this Mac (run claude in a terminal, then /login). " +
+          "If Claude Code isn't signed in on this Mac, your browser opens to sign in with your Claude account. " +
           "The agent restarts, and the Page Builder stops asking for an Anthropic API key.",
         buttons: ["Enable for the demo", "Cancel"],
         defaultId: 1,
@@ -189,9 +195,33 @@ function run(): void {
         return
       }
     }
-    state.update({ claudeCodeLogin: state.get().claudeCodeLogin !== true })
+    claudeToggleCount += 1
+    const toggle = claudeToggleCount
+    state.update({ claudeCodeLogin: isEnabling })
     await bridge.restart()
     tray?.refresh()
+    if (isEnabling) await signInToClaudeCode(toggle)
+  }
+
+  // Right after the demo mode is enabled: the daemon signs Claude Code in when nobody is (it opens the browser). When
+  // that fails the mode is turned off again, so that "on" always means a Claude the Page Builder can use.
+  async function signInToClaudeCode(toggle: number): Promise<void> {
+    const result = await bridge.signInToClaude()
+    if (state === undefined || toggle !== claudeToggleCount) return
+    if (result.status !== "failed") {
+      if (result.status === "signed_in") {
+        new Notification({ title: "Signed in to Claude Code", body: "Claude is ready in the Page Builder." }).show()
+      }
+      return
+    }
+    state.update({ claudeCodeLogin: false })
+    await bridge.restart()
+    tray?.refresh()
+    await dialog.showMessageBox({
+      type: "error",
+      message: "Couldn't sign in to Claude Code",
+      detail: `${result.reason} The demo option is off again: turn it on to try again.`,
+    })
   }
 
   function isNewerCopy(data: unknown): boolean {

@@ -26,10 +26,16 @@ export interface CreateBridgeProcessArgs {
 
 export type SignOutAccount = "prismic" | "chatgpt"
 
+// The daemon's answer to a Claude Code sign-in request (src/agents/provider.ts). `reason` is shown to the user.
+export type ClaudeSignInResult = { status: "already_signed_in" | "signed_in" } | { status: "failed"; reason: string }
+
 export interface BridgeProcess {
   signOut(account: SignOutAccount): Promise<boolean>
   // Asks the daemon for the ChatGPT authorization URL, to open in the browser.
   signIn(): Promise<string | undefined>
+  // Asks the daemon to sign the Claude Code login in (demo mode): it opens the browser itself and answers once the user
+  // is done there. Never rejects.
+  signInToClaude(): Promise<ClaudeSignInResult>
   start(): void
   stop(): Promise<void>
   restart(): Promise<void>
@@ -49,6 +55,8 @@ const maxHealthBytes = 1024
 // The daemon may wait for two 15 s network deadlines (discovery, revocation) before it answers.
 const signOutTimeoutMs = 45_000
 const signInUrlTimeoutMs = 10_000
+// The daemon downloads Claude Code first (15 min at most), then waits for the browser (5 min at most).
+const claudeSignInTimeoutMs = 25 * 60_000
 const healthTimeoutMs = 1000
 const portRetryMs = 30_000
 const stableAfterMs = 60_000
@@ -66,6 +74,8 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
   const signOutWaiters = new Map<SignOutAccount, (ok: boolean) => void>()
   const signOutsInFlight = new Map<SignOutAccount, Promise<boolean>>()
   let signInWaiter: ((url: string | undefined) => void) | undefined
+  let claudeSignInWaiter: ((result: ClaudeSignInResult) => void) | undefined
+  let claudeSignIn: Promise<ClaudeSignInResult> | undefined
   // Who the daemon runs as, as lines for the menu (src/cli.ts).
   let accounts: string[] = []
 
@@ -113,6 +123,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       clearInterval(healthTimer)
       child = undefined
       accounts = []
+      claudeSignInWaiter?.({ status: "failed", reason: "Prismic Agent stopped before the sign-in finished." })
       if (stopRequested) return setState({ kind: "stopped" })
       if (code === portInUseExitCode) {
         setState({ kind: "port_in_use" })
@@ -131,6 +142,11 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       const signInUrl = readSignInUrl(message)
       if (signInUrl !== undefined) {
         signInWaiter?.(signInUrl)
+        return
+      }
+      const claudeSignInResult = readClaudeSignInResult(message)
+      if (claudeSignInResult !== undefined) {
+        claudeSignInWaiter?.(claudeSignInResult)
         return
       }
       const signedOut = readSignedOut(message)
@@ -206,9 +222,31 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     })
   }
 
+  // A second request joins the first one: one browser sign-in at a time.
+  function signInToClaude(): Promise<ClaudeSignInResult> {
+    if (claudeSignIn !== undefined) return claudeSignIn
+    const running = child
+    if (running === undefined || !running.connected) {
+      return Promise.resolve({ status: "failed", reason: "Prismic Agent isn't running." })
+    }
+    const { promise, resolve } = Promise.withResolvers<ClaudeSignInResult>()
+    claudeSignInWaiter = resolve
+    running.send({ type: "sign_in", account: "claude" }, (error) => {
+      if (error !== null) resolve({ status: "failed", reason: "Couldn't reach Prismic Agent." })
+    })
+    const timer = setTimeout(() => resolve({ status: "failed", reason: "The sign-in took too long." }), claudeSignInTimeoutMs)
+    claudeSignIn = promise.finally(() => {
+      clearTimeout(timer)
+      claudeSignInWaiter = undefined
+      claudeSignIn = undefined
+    })
+    return claudeSignIn
+  }
+
   return {
     start,
     signIn: signInToChatGpt,
+    signInToClaude,
     signOut,
     stop,
     async restart() {
@@ -295,4 +333,17 @@ function readSignInUrl(message: unknown): string | undefined {
   if (typeof message !== "object" || message === null) return undefined
   if (!("type" in message) || message.type !== "sign_in_url" || !("url" in message)) return undefined
   return typeof message.url === "string" ? message.url : undefined
+}
+
+// The daemon's answer to a sign_in request for Claude (src/cli.ts).
+function readClaudeSignInResult(message: unknown): ClaudeSignInResult | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "sign_in_result" || !("account" in message) || message.account !== "claude") {
+    return undefined
+  }
+  if (!("status" in message)) return undefined
+  if (message.status === "signed_in" || message.status === "already_signed_in") return { status: message.status }
+  if (message.status !== "failed") return undefined
+  const reason = "reason" in message && typeof message.reason === "string" ? message.reason : "The sign-in didn't complete."
+  return { status: "failed", reason }
 }

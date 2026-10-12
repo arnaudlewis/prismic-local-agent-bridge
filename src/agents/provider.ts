@@ -58,6 +58,9 @@ export interface AgentProvider {
   // One line telling who the agent runs as (an email and a plan, an API key's last characters), for the desktop app's
   // menu. Never a secret. Aborting `signal` (the daemon is shutting down) stops any process it started.
   accountSummary?(signal?: AbortSignal): Promise<string>
+  // Signs the agent's account in from the desktop app's menu, when the account lives in the agent's own program (the
+  // Claude Code login of the demo mode). Resolves once the user is done; aborting `signal` stops it.
+  signIn?(signal?: AbortSignal): Promise<AgentSignInResult>
   // Secrets this agent's credentials are made of (an API key), known to the daemon. Everything the daemon sends to the
   // browser or stores has them replaced, in case the agent repeats one.
   secretValues?(): string[]
@@ -67,6 +70,9 @@ export interface AgentProvider {
   // HTTP routes of its own (sign-in flows, ...).
   routes?(): ProviderRoute[]
 }
+
+// The outcome of AgentProvider.signIn. `reason` is shown to the user as is.
+export type AgentSignInResult = { status: "already_signed_in" | "signed_in" } | { status: "failed"; reason: string }
 
 export interface AgentCredentials {
   // The provider's credential epoch as it was BEFORE the credentials were read. If the provider's epoch has moved
