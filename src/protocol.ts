@@ -8,7 +8,11 @@ export type AgentMode = (typeof agentModes)[number]
 
 export const windowIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// Becomes a filename on disk, so it is strict: lowercase UUID v4 only.
+export const conversationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
 const SessionSchema = z.object({
+  conversationId: z.string().regex(conversationIdPattern),
   mcpServerUrl: z.url({ protocol: /^https?$/ }),
   prismicToken: z.string().min(1),
   repository: z.string().min(1),
@@ -36,7 +40,37 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
 
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 
-export type ToolCallStatus = "pending" | "in_progress" | "completed" | "failed"
+const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"])
+
+export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>
+
+export const HistoryEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("user_message"), text: z.string() }),
+  z.object({ type: z.literal("agent_message_chunk"), text: z.string(), messageId: z.string().optional() }),
+  z.object({
+    type: z.literal("tool_call"),
+    toolCallId: z.string(),
+    title: z.string(),
+    status: ToolCallStatusSchema,
+  }),
+  z.object({
+    type: z.literal("tool_call_update"),
+    toolCallId: z.string(),
+    title: z.string().optional(),
+    status: ToolCallStatusSchema.optional(),
+  }),
+  z.object({
+    type: z.literal("permission_request"),
+    requestId: z.string(),
+    title: z.string(),
+    options: z.array(z.object({ optionId: z.string(), name: z.string(), kind: z.string() })),
+  }),
+  z.object({ type: z.literal("permission_resolved"), requestId: z.string(), optionId: z.string().optional() }),
+  z.object({ type: z.literal("notice"), tone: z.enum(["info", "error"]), text: z.string() }),
+  z.object({ type: z.literal("turn_end"), stopReason: z.string() }),
+])
+
+export type HistoryEvent = z.infer<typeof HistoryEventSchema>
 
 export interface BridgeConfigOption {
   id: string
@@ -53,6 +87,7 @@ export interface BridgeCommand {
 }
 
 export type BridgeEvent =
+  | { type: "chat_history"; events: HistoryEvent[] }
   | { type: "chat_status"; status: "idle" | "starting" | "running" }
   | { type: "session_config"; options: BridgeConfigOption[] }
   | { type: "available_commands"; commands: BridgeCommand[] }
@@ -67,6 +102,9 @@ export type BridgeEvent =
     }
   | { type: "turn_end"; stopReason: string }
   | { type: "notice"; tone: "info" | "error"; text: string }
+
+// The events that are both sent live and recorded in the transcript.
+export type RecordedBridgeEvent = Extract<BridgeEvent, { type: HistoryEvent["type"] }>
 
 export interface ChatGptStatus {
   status: "signed_out" | "signing_in" | "signed_in"

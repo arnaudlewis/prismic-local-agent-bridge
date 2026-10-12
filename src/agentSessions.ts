@@ -17,11 +17,18 @@ import type {
 import { ChatGptAuthError } from "./chatgptAuth.ts"
 import type { ChatGptAuth, ChatGptAuthErrorCode } from "./chatgptAuth.ts"
 import { buildCodexConfigEnv, resolveCodexAcpBin, writeCodexHome } from "./codexConfig.ts"
-import type { AgentMode, BridgeCommand, BridgeConfigOption, BridgeEvent, ClientMessage, Session } from "./protocol.ts"
+import { createConversationStore } from "./conversationStore.ts"
+import type { AgentMode, BridgeCommand, BridgeConfigOption, BridgeEvent, ClientMessage } from "./protocol.ts"
+import type { HistoryEvent, RecordedBridgeEvent, Session } from "./protocol.ts"
 import { bridgeInfo } from "./protocol.ts"
+import { createTranscript } from "./transcript.ts"
+import type { Transcript } from "./transcript.ts"
 import type { WindowChannels } from "./windowChannels.ts"
 
 const exitGraceMs = 3000
+// A conversation with no window attached and no turn running is stopped (and dropped from memory) after this long.
+const defaultIdleTtlMs = 6 * 60 * 60 * 1000
+const saveDebounceMs = 500
 
 const authErrorNotices: Record<ChatGptAuthErrorCode, string> = {
   signed_out: "Sign in with ChatGPT to use the local agent.",
@@ -40,6 +47,8 @@ interface CreateAgentSessionsArgs {
   allowFullAccess: boolean
   // Overrides the codex-acp entry point; only tests pass it.
   agentBin?: string
+  // Overrides the idle TTL; only tests pass it.
+  idleTtlMs?: number
   projectDir: string
   agentMode: AgentMode
   model: string | undefined
@@ -48,7 +57,8 @@ interface CreateAgentSessionsArgs {
 
 export interface AgentSessions {
   handleMessage(windowId: string, message: ClientMessage): Promise<void>
-  stopWindow(windowId: string): void
+  // The conversation, its agent and its transcript outlive the window; this only stops events from going to it.
+  detachWindow(windowId: string): void
   stopAll(): void
 }
 
@@ -56,6 +66,8 @@ interface StartedWith {
   chatgptExpiresAt: number
   mcpServerUrl: string
   prismicToken: string
+  // The MCP header X-Prismic-Window-Id must follow the attached window, so a new window restarts the agent.
+  windowId: string
 }
 
 interface PendingPermission {
@@ -76,27 +88,34 @@ interface AgentFields {
   pendingPermissions: Map<string, PendingPermission>
 }
 
-interface WindowState {
+interface Conversation {
+  id: string
+  repository: string
+  // The latest window attached to this conversation: the only one that receives live events.
+  windowId: string | undefined
   agent: AgentFields | undefined
   // Survives agent restarts so the user's model and effort choices persist; only chat_reset clears it.
   selectedConfig: Record<string, string>
   ensuring: Promise<boolean> | undefined
   // Bumped whenever the agent is stopped so an in-flight start can notice and abort.
   generation: number
+  // Set once a prompt has been accepted: an agent that never got one has nothing to resume.
+  resumeSessionId: string | undefined
+  transcript: Transcript
+  saveTimer: NodeJS.Timeout | undefined
+  idleTimer: NodeJS.Timeout | undefined
 }
 
 interface StartAgentArgs {
+  conversation: Conversation
   windowId: string
-  state: WindowState
   session: Session
   accessToken: string
   startedWith: StartedWith
-  resumeSessionId: string | undefined
 }
 
 interface AgentExitArgs {
-  windowId: string
-  state: WindowState
+  conversation: Conversation
   child: ChildProcess
   code: number | null
 }
@@ -106,38 +125,161 @@ class StartAbortedError extends Error {}
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
   const { channels, auth, dataDir, userCodexHome, allowFullAccess, agentBin, projectDir, agentMode, model, refreshMarginMs } =
     args
-  const states = new Map<string, WindowState>()
+  const idleTtlMs = args.idleTtlMs ?? defaultIdleTtlMs
+  const conversations = new Map<string, Conversation>()
+  const windowConversations = new Map<string, Conversation>()
+  const store = createConversationStore({ dataDir })
 
-  function send(windowId: string, event: BridgeEvent): void {
+  try {
+    store.pruneOldFiles(Date.now())
+  } catch (error) {
+    console.warn(`Could not prune old conversations: ${errorMessage(error)}`)
+  }
+
+  function sendToWindow(windowId: string, event: BridgeEvent): void {
     channels.send(windowId, event)
   }
 
-  function sendNotice(windowId: string, tone: "info" | "error", text: string): void {
-    send(windowId, { type: "notice", tone, text })
+  function sendLive(conversation: Conversation, event: BridgeEvent): void {
+    if (conversation.windowId !== undefined) channels.send(conversation.windowId, event)
   }
 
-  function getState(windowId: string): WindowState {
-    let state = states.get(windowId)
-    if (state === undefined) {
-      state = { agent: undefined, selectedConfig: {}, ensuring: undefined, generation: 0 }
-      states.set(windowId, state)
+  // Everything the UI renders goes through here so a window that attaches later can replay it.
+  function emit(conversation: Conversation, event: RecordedBridgeEvent): void {
+    record(conversation, event)
+    sendLive(conversation, event)
+  }
+
+  function record(conversation: Conversation, event: HistoryEvent): void {
+    conversation.transcript.append(event)
+    scheduleSave(conversation)
+  }
+
+  function notify(conversation: Conversation, tone: "info" | "error", text: string): void {
+    emit(conversation, { type: "notice", tone, text })
+  }
+
+  function setStatus(conversation: Conversation, status: "idle" | "starting" | "running"): void {
+    sendLive(conversation, { type: "chat_status", status })
+  }
+
+  function currentStatus(conversation: Conversation): "idle" | "running" {
+    return conversation.agent?.turnActive === true ? "running" : "idle"
+  }
+
+  function getConversation(session: Session): Conversation {
+    const existing = conversations.get(session.conversationId)
+    if (existing !== undefined) {
+      existing.repository = session.repository
+      return existing
     }
-    return state
+    const stored = store.load(session.conversationId)
+    const transcript = createTranscript({ events: stored?.events })
+    // The agent that was waiting on these is gone, so they can't be answered anymore.
+    for (const requestId of transcript.unresolvedPermissionIds()) {
+      transcript.append({ type: "permission_resolved", requestId })
+    }
+    const conversation: Conversation = {
+      id: session.conversationId,
+      repository: session.repository,
+      windowId: undefined,
+      agent: undefined,
+      selectedConfig: {},
+      ensuring: undefined,
+      generation: 0,
+      resumeSessionId: stored?.acpSessionId,
+      transcript,
+      saveTimer: undefined,
+      idleTimer: undefined,
+    }
+    conversations.set(conversation.id, conversation)
+    return conversation
   }
 
-  function sendSessionConfig(windowId: string, agent: AgentFields): void {
+  function attachWindow(conversation: Conversation, windowId: string): void {
+    const previous = windowConversations.get(windowId)
+    if (previous !== undefined && previous !== conversation) {
+      if (previous.windowId === windowId) previous.windowId = undefined
+      refreshIdleTimer(previous)
+    }
+    if (conversation.windowId !== undefined && conversation.windowId !== windowId) {
+      windowConversations.delete(conversation.windowId)
+    }
+    conversation.windowId = windowId
+    windowConversations.set(windowId, conversation)
+    refreshIdleTimer(conversation)
+  }
+
+  function detachWindow(windowId: string): void {
+    const conversation = windowConversations.get(windowId)
+    if (conversation === undefined) return
+    windowConversations.delete(windowId)
+    if (conversation.windowId === windowId) conversation.windowId = undefined
+    refreshIdleTimer(conversation)
+  }
+
+  function refreshIdleTimer(conversation: Conversation): void {
+    clearTimeout(conversation.idleTimer)
+    conversation.idleTimer = undefined
+    if (conversation.windowId !== undefined || conversation.agent?.turnActive === true) return
+    conversation.idleTimer = setTimeout(() => evict(conversation), idleTtlMs)
+    conversation.idleTimer.unref()
+  }
+
+  // Stops the agent and drops the conversation from memory; the transcript stays on disk and reloads on the next open.
+  function evict(conversation: Conversation): void {
+    stopConversation(conversation)
+    conversations.delete(conversation.id)
+  }
+
+  function stopConversation(conversation: Conversation): void {
+    clearTimeout(conversation.idleTimer)
+    conversation.idleTimer = undefined
+    stopAgent(conversation)
+    flushSave(conversation)
+  }
+
+  function scheduleSave(conversation: Conversation): void {
+    if (conversation.saveTimer !== undefined) return
+    conversation.saveTimer = setTimeout(() => flushSave(conversation), saveDebounceMs)
+    conversation.saveTimer.unref()
+  }
+
+  function flushSave(conversation: Conversation): void {
+    clearTimeout(conversation.saveTimer)
+    conversation.saveTimer = undefined
+    const events = conversation.transcript.events()
+    if (events.length === 0 && conversation.resumeSessionId === undefined) return
+    try {
+      store.save({
+        version: 1,
+        conversationId: conversation.id,
+        repository: conversation.repository,
+        acpSessionId: conversation.resumeSessionId,
+        updatedAt: Date.now(),
+        events,
+      })
+    } catch (error) {
+      console.warn(`Could not save conversation ${conversation.id}: ${errorMessage(error)}`)
+    }
+  }
+
+  function sendSessionConfig(conversation: Conversation, agent: AgentFields): void {
     const options = toBridgeConfigOptions(agent.configOptions)
-    send(windowId, { type: "session_config", options: allowFullAccess ? options : options.map(withoutFullAccess) })
+    sendLive(conversation, {
+      type: "session_config",
+      options: allowFullAccess ? options : options.map(withoutFullAccess),
+    })
   }
 
-  function sendAvailableCommands(windowId: string, agent: AgentFields): void {
+  function sendAvailableCommands(conversation: Conversation, agent: AgentFields): void {
     if (agent.availableCommands.length === 0) return
-    send(windowId, { type: "available_commands", commands: agent.availableCommands })
+    sendLive(conversation, { type: "available_commands", commands: agent.availableCommands })
   }
 
-  function sendAgentState(windowId: string, agent: AgentFields): void {
-    sendSessionConfig(windowId, agent)
-    sendAvailableCommands(windowId, agent)
+  function sendAgentState(conversation: Conversation, agent: AgentFields): void {
+    sendSessionConfig(conversation, agent)
+    sendAvailableCommands(conversation, agent)
   }
 
   async function handleMessage(windowId: string, message: ClientMessage): Promise<void> {
@@ -158,43 +300,46 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   async function handleChatOpen(windowId: string, message: Extract<ClientMessage, { type: "chat_open" }>) {
-    const state = getState(windowId)
-    if (Object.keys(state.selectedConfig).length === 0 && message.preferredConfig !== undefined) {
+    const conversation = getConversation(message.session)
+    attachWindow(conversation, windowId)
+    if (Object.keys(conversation.selectedConfig).length === 0 && message.preferredConfig !== undefined) {
       // The mode is a security setting: a page must not be able to change it just by opening the chat.
       const { mode: _ignoredMode, ...preferredConfig } = message.preferredConfig
-      state.selectedConfig = preferredConfig
+      conversation.selectedConfig = preferredConfig
     }
-    send(windowId, { type: "chat_status", status: "starting" })
-    const before = state.agent
-    const ready = await ensureAgent(windowId, message.session)
-    if (ready && state.agent !== undefined && state.agent === before) {
-      sendAgentState(windowId, state.agent)
+    sendToWindow(windowId, { type: "chat_history", events: conversation.transcript.events() })
+    setStatus(conversation, conversation.agent?.turnActive === true ? "running" : "starting")
+    const before = conversation.agent
+    const ready = await ensureAgent(conversation, windowId, message.session)
+    if (ready && conversation.agent !== undefined && conversation.agent === before) {
+      sendAgentState(conversation, conversation.agent)
     }
-    send(windowId, { type: "chat_status", status: "idle" })
+    setStatus(conversation, currentStatus(conversation))
   }
 
   async function handleChatPrompt(windowId: string, message: Extract<ClientMessage, { type: "chat_prompt" }>) {
-    const state = getState(windowId)
-    if (state.agent?.turnActive === true) {
-      sendNotice(windowId, "info", "A reply is already in progress.")
+    const conversation = getConversation(message.session)
+    attachWindow(conversation, windowId)
+    if (conversation.agent?.turnActive === true) {
+      notify(conversation, "info", "A reply is already in progress.")
       return
     }
     const blocked = blockedCommandName(message.text)
     if (blocked !== undefined) {
-      sendNotice(windowId, "error", `The /${blocked} command isn't available in the local agent.`)
-      send(windowId, { type: "chat_status", status: "idle" })
+      notify(conversation, "error", `The /${blocked} command isn't available in the local agent.`)
+      setStatus(conversation, "idle")
       return
     }
-    send(windowId, { type: "chat_status", status: "starting" })
-    const ready = await ensureAgent(windowId, message.session)
+    setStatus(conversation, "starting")
+    const ready = await ensureAgent(conversation, windowId, message.session)
     if (!ready) return
-    const agent = state.agent
+    const agent = conversation.agent
     if (agent === undefined) {
-      send(windowId, { type: "chat_status", status: "idle" })
+      setStatus(conversation, "idle")
       return
     }
     if (agent.turnActive) {
-      sendNotice(windowId, "info", "A reply is already in progress.")
+      notify(conversation, "info", "A reply is already in progress.")
       return
     }
 
@@ -207,16 +352,23 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       agent.preambleSent = true
     }
 
+    record(conversation, { type: "user_message", text: message.text })
+    conversation.resumeSessionId = agent.sessionId
     agent.turnActive = true
-    send(windowId, { type: "chat_status", status: "running" })
+    clearTimeout(conversation.idleTimer)
+    setStatus(conversation, "running")
     try {
       const response = await agent.connection.prompt({ sessionId: agent.sessionId, prompt })
-      send(windowId, { type: "turn_end", stopReason: response.stopReason })
+      if (conversation.agent === agent) emit(conversation, { type: "turn_end", stopReason: response.stopReason })
     } catch (error) {
-      if (state.agent === agent) sendNotice(windowId, "error", describePromptError(error))
+      if (conversation.agent === agent) notify(conversation, "error", describePromptError(error))
     } finally {
       agent.turnActive = false
-      send(windowId, { type: "chat_status", status: "idle" })
+      if (conversation.agent === agent) {
+        setStatus(conversation, "idle")
+        scheduleSave(conversation)
+        refreshIdleTimer(conversation)
+      }
     }
   }
 
@@ -224,18 +376,19 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     windowId: string,
     message: Extract<ClientMessage, { type: "set_config_option" }>,
   ) {
-    const agent = states.get(windowId)?.agent
-    if (agent === undefined) {
-      sendNotice(windowId, "info", "The local agent isn't running yet.")
+    const conversation = windowConversations.get(windowId)
+    const agent = conversation?.agent
+    if (conversation === undefined || agent === undefined) {
+      sendToWindow(windowId, { type: "notice", tone: "info", text: "The local agent isn't running yet." })
       return
     }
     if (!allowFullAccess && isFullAccessRequest(message.configId, message.value)) {
-      sendNotice(windowId, "error", fullAccessDisabledNotice)
-      sendSessionConfig(windowId, agent)
+      notify(conversation, "error", fullAccessDisabledNotice)
+      sendSessionConfig(conversation, agent)
       return
     }
     if (agent.turnActive) {
-      sendNotice(windowId, "info", "Wait for the current reply to finish before changing the model or effort.")
+      notify(conversation, "info", "Wait for the current reply to finish before changing the model or effort.")
       return
     }
     const { configId, value } = message
@@ -245,42 +398,58 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         configId,
         value,
       })
-      getState(windowId).selectedConfig[configId] = value
+      conversation.selectedConfig[configId] = value
       agent.configOptions = response.configOptions
     } catch (error) {
       const optionName = agent.configOptions.find((option) => option.id === configId)?.name ?? configId
-      sendNotice(windowId, "error", `Couldn't change ${optionName}: ${errorMessage(error)}`)
+      notify(conversation, "error", `Couldn't change ${optionName}: ${errorMessage(error)}`)
     }
-    sendSessionConfig(windowId, agent)
+    sendSessionConfig(conversation, agent)
   }
 
   async function handleChatCancel(windowId: string) {
-    const agent = states.get(windowId)?.agent
-    if (agent === undefined) return
-    cancelPendingPermissions(agent)
+    const conversation = windowConversations.get(windowId)
+    const agent = conversation?.agent
+    if (conversation === undefined || agent === undefined) return
+    cancelPendingPermissions(conversation, agent)
     await agent.connection.cancel({ sessionId: agent.sessionId })
   }
 
   function handleChatReset(windowId: string) {
-    const state = getState(windowId)
-    stopAgent(state)
-    state.selectedConfig = {}
-    send(windowId, { type: "chat_status", status: "idle" })
+    const conversation = windowConversations.get(windowId)
+    if (conversation === undefined) {
+      sendToWindow(windowId, { type: "chat_status", status: "idle" })
+      return
+    }
+    stopAgent(conversation)
+    conversation.selectedConfig = {}
+    conversation.resumeSessionId = undefined
+    conversation.transcript.clear()
+    clearTimeout(conversation.saveTimer)
+    conversation.saveTimer = undefined
+    try {
+      store.remove(conversation.id)
+    } catch (error) {
+      console.warn(`Could not delete conversation ${conversation.id}: ${errorMessage(error)}`)
+    }
+    setStatus(conversation, "idle")
   }
 
   function handlePermissionResponse(
     windowId: string,
     message: Extract<ClientMessage, { type: "permission_response" }>,
   ) {
-    const agent = states.get(windowId)?.agent
+    const conversation = windowConversations.get(windowId)
+    const agent = conversation?.agent
     const pending = agent?.pendingPermissions.get(message.requestId)
-    if (agent === undefined || pending === undefined) return
+    if (conversation === undefined || agent === undefined || pending === undefined) return
     const { optionId } = message
     if (optionId !== undefined && !pending.optionIds.has(optionId)) {
       console.warn(`Ignored permission response with unknown option from a window`)
       return
     }
     agent.pendingPermissions.delete(message.requestId)
+    record(conversation, { type: "permission_resolved", requestId: message.requestId, optionId })
     pending.resolve(
       optionId === undefined
         ? { outcome: { outcome: "cancelled" } }
@@ -288,16 +457,25 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     )
   }
 
-  function ensureAgent(windowId: string, session: Session): Promise<boolean> {
-    const state = getState(windowId)
-    const next = (state.ensuring ?? Promise.resolve(true)).then(() => doEnsureAgent(windowId, state, session))
-    state.ensuring = next
+  function cancelPendingPermissions(conversation: Conversation, agent: AgentFields): void {
+    for (const [requestId, pending] of agent.pendingPermissions) {
+      record(conversation, { type: "permission_resolved", requestId })
+      pending.resolve({ outcome: { outcome: "cancelled" } })
+    }
+    agent.pendingPermissions.clear()
+  }
+
+  function ensureAgent(conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
+    const next = (conversation.ensuring ?? Promise.resolve(true)).then(() =>
+      doEnsureAgent(conversation, windowId, session),
+    )
+    conversation.ensuring = next
     return next.finally(() => {
-      if (state.ensuring === next) state.ensuring = undefined
+      if (conversation.ensuring === next) conversation.ensuring = undefined
     })
   }
 
-  async function doEnsureAgent(windowId: string, state: WindowState, session: Session): Promise<boolean> {
+  async function doEnsureAgent(conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
     let accessToken: string
     let expiresAt: number
     try {
@@ -306,8 +484,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       expiresAt = token.expiresAt
     } catch (error) {
       const text = error instanceof ChatGptAuthError ? authErrorNotices[error.code] : `Agent error: ${errorMessage(error)}`
-      sendNotice(windowId, "error", text)
-      send(windowId, { type: "chat_status", status: "idle" })
+      notify(conversation, "error", text)
+      setStatus(conversation, "idle")
       return false
     }
 
@@ -315,30 +493,31 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       chatgptExpiresAt: expiresAt,
       mcpServerUrl: session.mcpServerUrl,
       prismicToken: session.prismicToken,
+      windowId,
     }
-    const current = state.agent
+    const current = conversation.agent
     if (current !== undefined && (current.turnActive || sameStartedWith(current.startedWith, startedWith))) {
       return true
     }
 
-    const resumeSessionId = current?.sessionId
-    const stopped = stopAgent(state)
+    const stopped = stopAgent(conversation)
     if (stopped !== undefined) await waitForExit(stopped)
 
     try {
-      await startAgent({ windowId, state, session, accessToken, startedWith, resumeSessionId })
+      await startAgent({ conversation, windowId, session, accessToken, startedWith })
       return true
     } catch (error) {
       if (error instanceof StartAbortedError) return false
-      sendNotice(windowId, "error", `Couldn't start the local agent: ${errorMessage(error)}`)
-      send(windowId, { type: "chat_status", status: "idle" })
+      notify(conversation, "error", `Couldn't start the local agent: ${errorMessage(error)}`)
+      setStatus(conversation, "idle")
       return false
     }
   }
 
   async function startAgent(startArgs: StartAgentArgs): Promise<void> {
-    const { windowId, state, session, accessToken, startedWith, resumeSessionId } = startArgs
-    const generation = state.generation
+    const { conversation, windowId, session, accessToken, startedWith } = startArgs
+    const generation = conversation.generation
+    const resumeSessionId = conversation.resumeSessionId
 
     const codexEnv =
       userCodexHome === undefined
@@ -358,11 +537,11 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     })
     child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
     child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
-    child.on("exit", (code) => handleAgentExit({ windowId, state, child, code }))
+    child.on("exit", (code) => handleAgentExit({ conversation, child, code }))
 
     const client: Client = {
-      requestPermission: (params) => requestPermission(windowId, agent, params),
-      sessionUpdate: (notification) => handleSessionUpdate(windowId, agent, notification),
+      requestPermission: (params) => requestPermission(conversation, agent, params),
+      sessionUpdate: (notification) => handleSessionUpdate(conversation, agent, notification),
     }
     // Node's web stream typings and the SDK's DOM-based ones disagree on the buffer type; the runtime objects are compatible.
     const input = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>
@@ -406,6 +585,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       if (resumeSessionId !== undefined) {
         if (initialized.agentCapabilities?.loadSession === true) {
           agent.sessionId = resumeSessionId
+          // The agent replays the whole history as updates; they are already in the transcript.
           agent.replaying = true
           try {
             const loaded = await connection.loadSession({ sessionId: resumeSessionId, cwd: projectDir, mcpServers })
@@ -418,8 +598,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
           }
         }
         if (!resumed) {
-          sendNotice(
-            windowId,
+          notify(
+            conversation,
             "info",
             "Started a new agent session after renewing the ChatGPT token; earlier messages aren't in the agent's memory.",
           )
@@ -433,19 +613,23 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       }
       agent.preambleSent = resumed
 
-      if (state.generation !== generation) throw new StartAbortedError()
-      state.agent = agent
+      if (conversation.generation !== generation) throw new StartAbortedError()
+      conversation.agent = agent
+      if (resumeSessionId !== undefined) {
+        conversation.resumeSessionId = agent.sessionId
+        scheduleSave(conversation)
+      }
 
-      await applySelectedConfig(state, agent)
-      sendAgentState(windowId, agent)
+      await applySelectedConfig(conversation, agent)
+      sendAgentState(conversation, agent)
     } catch (error) {
       child.kill("SIGTERM")
       throw error
     }
   }
 
-  async function applySelectedConfig(state: WindowState, agent: AgentFields): Promise<void> {
-    const entries = Object.entries(state.selectedConfig).sort(
+  async function applySelectedConfig(conversation: Conversation, agent: AgentFields): Promise<void> {
+    const entries = Object.entries(conversation.selectedConfig).sort(
       ([a], [b]) => Number(b === "model") - Number(a === "model"),
     )
     for (const [configId, value] of entries) {
@@ -464,7 +648,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function requestPermission(
-    windowId: string,
+    conversation: Conversation,
     agent: AgentFields,
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
@@ -474,7 +658,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         resolve,
         optionIds: new Set(params.options.map((option) => option.optionId)),
       })
-      send(windowId, {
+      emit(conversation, {
         type: "permission_request",
         requestId,
         title: params.toolCall.title ?? "Permission requested",
@@ -487,7 +671,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     })
   }
 
-  function handleSessionUpdate(windowId: string, agent: AgentFields, notification: SessionNotification): void {
+  function handleSessionUpdate(conversation: Conversation, agent: AgentFields, notification: SessionNotification): void {
     if (agent.sessionId !== "" && notification.sessionId !== agent.sessionId) return
     const update = notification.update
     if (update.sessionUpdate === "available_commands_update") {
@@ -496,21 +680,21 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         .map(toBridgeCommand)
         .filter((command) => !blockedCommands.includes(command.name.toLowerCase()))
         .filter((command) => !hiddenCommands.includes(command.name.toLowerCase()))
-      if (!agent.replaying) sendAvailableCommands(windowId, agent)
+      if (!agent.replaying) sendAvailableCommands(conversation, agent)
       return
     }
     if (agent.replaying) return
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
         if (update.content.type !== "text") return
-        send(windowId, {
+        emit(conversation, {
           type: "agent_message_chunk",
           text: update.content.text,
           messageId: update.messageId ?? undefined,
         })
         return
       case "tool_call":
-        send(windowId, {
+        emit(conversation, {
           type: "tool_call",
           toolCallId: update.toolCallId,
           title: update.title,
@@ -518,7 +702,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         })
         return
       case "tool_call_update":
-        send(windowId, {
+        emit(conversation, {
           type: "tool_call_update",
           toolCallId: update.toolCallId,
           title: update.title ?? undefined,
@@ -527,7 +711,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
         return
       case "config_option_update":
         agent.configOptions = update.configOptions
-        sendSessionConfig(windowId, agent)
+        sendSessionConfig(conversation, agent)
         return
       default:
         return
@@ -535,63 +719,61 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function handleAgentExit(exitArgs: AgentExitArgs): void {
-    const { windowId, state, child, code } = exitArgs
-    const agent = state.agent
+    const { conversation, child, code } = exitArgs
+    const agent = conversation.agent
     if (agent?.child !== child) return
-    state.agent = undefined
-    cancelPendingPermissions(agent)
+    conversation.agent = undefined
+    cancelPendingPermissions(conversation, agent)
     if (agent.turnActive) {
-      sendNotice(
-        windowId,
+      notify(
+        conversation,
         "error",
         `The local agent stopped (exit code ${code ?? "unknown"}). Send a message to restart it.`,
       )
     }
-    send(windowId, { type: "chat_status", status: "idle" })
+    setStatus(conversation, "idle")
+    scheduleSave(conversation)
+    refreshIdleTimer(conversation)
   }
 
-  function stopAgent(state: WindowState): ChildProcess | undefined {
-    state.generation += 1
-    const agent = state.agent
-    state.agent = undefined
+  function stopAgent(conversation: Conversation): ChildProcess | undefined {
+    conversation.generation += 1
+    const agent = conversation.agent
+    conversation.agent = undefined
     if (agent === undefined) return undefined
-    cancelPendingPermissions(agent)
+    cancelPendingPermissions(conversation, agent)
     agent.child.kill("SIGTERM")
     return agent.child
   }
 
-  function stopWindow(windowId: string): void {
-    const state = states.get(windowId)
-    if (state === undefined) return
-    stopAgent(state)
-    states.delete(windowId)
-  }
-
   function stopAll(): void {
-    for (const windowId of [...states.keys()]) stopWindow(windowId)
+    for (const conversation of conversations.values()) stopConversation(conversation)
+    conversations.clear()
+    windowConversations.clear()
   }
 
   channels.onMessage((windowId, message) => {
     handleMessage(windowId, message).catch((error: unknown) => {
       console.error(`Failed to handle ${message.type}: ${errorMessage(error)}`)
-      sendNotice(windowId, "error", `Agent error: ${errorMessage(error)}`)
-      send(windowId, { type: "chat_status", status: "idle" })
+      const conversation = windowConversations.get(windowId)
+      const notice: BridgeEvent = { type: "notice", tone: "error", text: `Agent error: ${errorMessage(error)}` }
+      if (conversation === undefined) sendToWindow(windowId, notice)
+      else sendLive(conversation, notice)
+      sendToWindow(windowId, { type: "chat_status", status: "idle" })
     })
   })
-  channels.onWindowClosed(stopWindow)
+  channels.onWindowClosed(detachWindow)
 
-  return { handleMessage, stopWindow, stopAll }
+  return { handleMessage, detachWindow, stopAll }
 }
 
 function sameStartedWith(a: StartedWith, b: StartedWith): boolean {
   return (
-    a.chatgptExpiresAt === b.chatgptExpiresAt && a.mcpServerUrl === b.mcpServerUrl && a.prismicToken === b.prismicToken
+    a.chatgptExpiresAt === b.chatgptExpiresAt &&
+    a.mcpServerUrl === b.mcpServerUrl &&
+    a.prismicToken === b.prismicToken &&
+    a.windowId === b.windowId
   )
-}
-
-function cancelPendingPermissions(agent: AgentFields): void {
-  for (const pending of agent.pendingPermissions.values()) pending.resolve({ outcome: { outcome: "cancelled" } })
-  agent.pendingPermissions.clear()
 }
 
 function waitForExit(child: ChildProcess): Promise<void> {

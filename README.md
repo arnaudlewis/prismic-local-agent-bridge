@@ -26,7 +26,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 Environment:
 
 - `PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS` (default `300000`): the ChatGPT access token is refreshed, and the agent restarted, when it has less validity left than this.
-- `XDG_CONFIG_HOME`: data directory is `$XDG_CONFIG_HOME/prismic-local-agent-bridge` (default `~/.config/...`). It holds `credentials.json` (mode 600), `host.json` and `codex-home/`.
+- `XDG_CONFIG_HOME`: data directory is `$XDG_CONFIG_HOME/prismic-local-agent-bridge` (default `~/.config/...`). It holds `credentials.json` (mode 600), `host.json`, `codex-home/` and `conversations/` (see Persistent conversations).
 
 ## Demo quick start
 
@@ -66,12 +66,26 @@ The mode (`mode` config option) starts from `--agent-mode` for every new session
 
 The `agent-full-access` mode (unrestricted file and network access) is disabled by default, because a page open in the browser can contain untrusted content. Without `--allow-full-access` the bridge removes that value from the `mode` option in every `session_config`, and answers a `set_config_option` for it with the notice "Full access is disabled. Restart the bridge with --allow-full-access to enable it." The banner shows `Full access: allowed` or `Full access: disabled`.
 
+## Persistent conversations
+
+A conversation is identified by a `conversationId` (a lowercase UUID v4 the browser sends in `session` with `chat_open` and `chat_prompt`; anything else is rejected, because it becomes a filename). It is not tied to a browser window anymore:
+
+- **Refresh:** the agent keeps running, even mid-turn, when the page closes or reloads; closing the socket only detaches the window. The newest window attached to a conversation receives its live events; an older one just stops receiving. On `chat_open` the bridge first sends `{ "type": "chat_history", "events": [...] }` (user messages, agent text, tool calls, permission requests, notices, turn ends), then `session_config`, `available_commands` and the current `chat_status` (`running` if a turn is active). A permission request the agent is still waiting on stays a plain `permission_request` and can still be answered; answered or cancelled ones are followed by a `permission_resolved`.
+- **Window binding:** the MCP header `X-Prismic-Window-Id` follows the attached window. The first `chat_open` or `chat_prompt` from a new window restarts the agent (never during a turn) and resumes its session with ACP `session/load`.
+- **Daemon restart:** each conversation is saved to `<data dir>/conversations/<conversationId>.json` (`{ version, conversationId, repository, acpSessionId?, updatedAt, events }`), in a `0700` directory with `0600` files, written atomically and debounced (about 500 ms, flushed on exit). The file is loaded on the first `chat_open` of that id and the agent resumes the stored ACP session. If the session can't be resumed, a new one starts with the notice "Started a new agent session after renewing the ChatGPT token; earlier messages aren't in the agent's memory." A corrupt file is ignored with a warning. A session only resumes once a prompt has been sent in it.
+- **Transcript limits:** consecutive text chunks of the same message are merged, and the log is capped at 3000 events or about 2 MB; the oldest events are dropped first, but never a permission request that is still unanswered.
+- **TTL:** a conversation with no window attached and no turn running is stopped after 6 hours (it stays on disk). Files older than 30 days are deleted at startup.
+- **Reset:** `chat_reset` stops the agent and deletes the transcript, the stored session and the file. The next `chat_open` starts a fresh conversation, with a new preamble.
+
+The transcript contains your prompts and the agent's replies and tool titles in plain text: treat the `conversations/` directory as private.
+
 ## Threat model
 
 - **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization.
 - **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write` and `agent` (auto review) with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
 - **`--allow-full-access`** only gates the `agent-full-access` preset, the only mode that never asks for approval. It does not restrict the other modes.
 - **`--use-user-codex`:** the agent uses your Codex home, config, hooks and MCP servers, and all their tools become reachable from the browser (see "Codex home").
+- **Stored transcripts:** conversations are saved in plain text under `<data dir>/conversations/` (`0600`), so anyone who can read your files can read them. They are never logged, and `chat_reset` deletes them. A conversation is reachable by any paired window that knows its id; ids are random UUIDs.
 - **Blocked commands:** `/logout` is account-global (it would sign out Codex outside the bridge). `/review`, `/review-branch`, `/review-commit` and `/goal` start turns that codex-acp runs outside the bridge's agent mode, sandbox and approval policy. They are removed from the command list and rejected on incoming prompts.
 
 ## Slash commands and skills
