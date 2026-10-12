@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream"
 import { WebSocketServer } from "ws"
 import { z } from "zod"
 
-import type { ChatGptAuth } from "./chatgptAuth.ts"
+import type { ChatGptAuth } from "./agents/codex/chatgptAuth.ts"
 import {
   HttpError,
   applyCors,

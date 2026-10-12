@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { buildAuthorizationUrl, classifyRefreshFailure } from "./chatgptAuth.ts"
+import { buildAuthorizationUrl, classifyRefreshFailure } from "./oauth.ts"
 
 const baseArgs = {
   hostId: "urn:uuid:11111111-1111-4111-8111-111111111111",

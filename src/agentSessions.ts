@@ -14,9 +14,9 @@ import type {
   SessionNotification,
 } from "@agentclientprotocol/sdk"
 
-import { ChatGptAuthError } from "./chatgptAuth.ts"
-import type { ChatGptAuth, ChatGptAuthErrorCode } from "./chatgptAuth.ts"
-import { buildCodexConfigEnv, resolveCodexAcpBin, writeCodexHome } from "./codexConfig.ts"
+import { ChatGptAuthError } from "./agents/codex/chatgptAuth.ts"
+import type { ChatGptAuth, ChatGptAuthErrorCode } from "./agents/codex/chatgptAuth.ts"
+import { buildCodexConfigEnv, resolveCodexAcpBin, writeCodexHome } from "./agents/codex/codexConfig.ts"
 import { createConversationStore } from "./conversationStore.ts"
 import {
   buildEditorContextBlock,

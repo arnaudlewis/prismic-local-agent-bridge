@@ -60,7 +60,7 @@ export function buildCodexConfigEnv(args: { model?: string }): string {
 const CodexAcpPackageSchema = z.object({ bin: z.object({ "codex-acp": z.string() }) })
 
 export function resolveCodexAcpBin(): string {
-  const packageUrl = new URL("../node_modules/@agentclientprotocol/codex-acp/package.json", import.meta.url)
+  const packageUrl = new URL("../../../node_modules/@agentclientprotocol/codex-acp/package.json", import.meta.url)
   const packagePath = fileURLToPath(packageUrl)
   const packageJson = CodexAcpPackageSchema.parse(JSON.parse(readFileSync(packagePath, "utf8")))
   return resolve(dirname(packagePath), packageJson.bin["codex-acp"])

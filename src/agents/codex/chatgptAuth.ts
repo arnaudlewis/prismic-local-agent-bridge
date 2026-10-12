@@ -1,24 +1,26 @@
-import { spawn } from "node:child_process"
-import { createHash, randomBytes, randomUUID } from "node:crypto"
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { createHash, randomBytes } from "node:crypto"
+import { renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createRemoteJWKSet, jwtVerify } from "jose"
 import { z } from "zod"
 
-import type { ChatGptStatus } from "./protocol.ts"
-
-const issuer = "https://auth.openai.com"
-const authorizationEndpoint = `${issuer}/api/accounts/authorize`
-const tokenEndpoint = `${issuer}/api/accounts/oauth/token`
-const jwksEndpoint = `${issuer}/.well-known/jwks.json`
-const discoveryEndpoint = `${issuer}/.well-known/openid-configuration`
-const resource = "https://api.openai.com/v1"
-const scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
-const planUsageScope = "chatgpt.tokens.use.direct"
-const agentNameHint = "Prismic Local Agent"
-const dynamicClientId = "dynamic_agent_client"
-const attemptTtlMs = 10 * 60 * 1000
-const requestTimeoutMs = 15_000
+import { errorMessage } from "../../errors.ts"
+import type { ChatGptStatus } from "../../protocol.ts"
+import { CredentialsSchema, hasPlanUsageScope, loadCredentials, loadHostId } from "./credentialsFile.ts"
+import type { Credentials } from "./credentialsFile.ts"
+import {
+  attemptTtlMs,
+  authorizationEndpoint,
+  buildAuthorizationUrl,
+  classifyRefreshFailure,
+  issuer,
+  jwksEndpoint,
+  redactAuthorizationUrl,
+  resource,
+  scopes,
+  tokenEndpoint,
+} from "./oauth.ts"
+import { logAvailableModels, openBrowser, postForm, readErrorCode, revokeRefreshToken } from "./oauthHttp.ts"
 
 export type ChatGptAuthErrorCode = "signed_out" | "plan_usage_disabled" | "refresh_failed"
 
@@ -31,86 +33,6 @@ export class ChatGptAuthError extends Error {
   }
 }
 
-interface BuildAuthorizationUrlArgs {
-  clientId?: string
-  hostId: string
-  redirectUri: string
-  state: string
-  nonce: string
-  codeChallenge: string
-  idTokenHint?: string
-  loginHint?: string
-  forceConsent: boolean
-}
-
-export function buildAuthorizationUrl(args: BuildAuthorizationUrlArgs): string {
-  const { clientId, hostId, redirectUri, state, nonce, codeChallenge, idTokenHint, loginHint, forceConsent } = args
-  const url = new URL(authorizationEndpoint)
-  const params = url.searchParams
-  params.set("response_type", "code")
-  params.set("client_id", clientId ?? dynamicClientId)
-  params.set("ext_agent_host_id", hostId)
-  params.set("redirect_uri", redirectUri)
-  params.set("scope", scopes)
-  params.set("resource", resource)
-  params.set("state", state)
-  params.set("nonce", nonce)
-  params.set("code_challenge_method", "S256")
-  params.set("code_challenge", codeChallenge)
-  if (clientId === undefined) {
-    params.set("agent_name_hint", agentNameHint)
-  } else {
-    if (idTokenHint !== undefined) params.set("id_token_hint", idTokenHint)
-    if (loginHint !== undefined) params.set("login_hint", loginHint)
-  }
-  if (forceConsent) params.set("prompt", "consent")
-  return url.href
-}
-
-function redactAuthorizationUrl(authorizationUrl: string): string {
-  const url = new URL(authorizationUrl)
-  url.searchParams.delete("id_token_hint")
-  url.searchParams.delete("login_hint")
-  return url.href
-}
-
-interface ClassifyRefreshFailureArgs {
-  status: number
-  errorCode: string | undefined
-}
-
-export function classifyRefreshFailure(args: ClassifyRefreshFailureArgs): "terminal" | "invalid_client" | "transient" {
-  switch (args.errorCode) {
-    case "invalid_grant":
-    case "invalid_refresh_token":
-    case "token_expired":
-    case "refresh_token_expired":
-    case "refresh_token_invalidated":
-    case "refresh_token_reused":
-      return "terminal"
-    case "invalid_client":
-      return "invalid_client"
-    default:
-      return "transient"
-  }
-}
-
-const CredentialsSchema = z.object({
-  email: z.string().optional(),
-  subject: z.string(),
-  clientId: z.string(),
-  idToken: z.string(),
-  accessToken: z.string().optional(),
-  refreshToken: z.string().optional(),
-  expiresAt: z.number().optional(),
-  scopes: z.array(z.string()),
-  savedAt: z.number(),
-})
-
-type Credentials = z.infer<typeof CredentialsSchema>
-
-const HostSchema = z.object({ extAgentHostId: z.string().min(1) })
-
 const TokenResponseSchema = z.object({
   id_token: z.string().optional(),
   access_token: z.string().optional(),
@@ -120,16 +42,6 @@ const TokenResponseSchema = z.object({
 })
 
 type TokenResponse = z.infer<typeof TokenResponseSchema>
-
-const ModelsResponseSchema = z.object({
-  data: z.array(
-    z.object({
-      id: z.string(),
-      slug: z.string().optional(),
-      visibility: z.string().optional(),
-    }),
-  ),
-})
 
 interface PendingAttempt {
   state: string
@@ -161,6 +73,7 @@ export interface ChatGptAuth {
   getAccessToken(minValidityMs: number): Promise<AccessToken>
   signOut(): Promise<void>
 }
+
 
 export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
   const { dataDir, redirectUri } = args
@@ -429,116 +342,3 @@ export function createChatGptAuth(args: CreateChatGptAuthArgs): ChatGptAuth {
   return { getStatus, startSignIn, handleCallback, getAccessToken, signOut }
 }
 
-async function revokeRefreshToken(args: { clientId: string; refreshToken: string }): Promise<void> {
-  try {
-    const discovery = await fetch(discoveryEndpoint, { signal: AbortSignal.timeout(requestTimeoutMs) })
-    const metadata = z.object({ revocation_endpoint: z.string().optional() }).parse(await discovery.json())
-    if (metadata.revocation_endpoint === undefined) {
-      console.warn("ChatGPT sign-out: no revocation endpoint advertised")
-      return
-    }
-    const response = await postForm(metadata.revocation_endpoint, {
-      token: args.refreshToken,
-      token_type_hint: "refresh_token",
-      client_id: args.clientId,
-    })
-    if (!response.ok) console.warn(`ChatGPT sign-out: token revocation returned ${response.status}`)
-  } catch (error) {
-    console.warn(`ChatGPT sign-out: token revocation failed: ${errorMessage(error)}`)
-  }
-}
-
-async function logAvailableModels(accessToken: string | undefined): Promise<void> {
-  if (accessToken === undefined) return
-  try {
-    const response = await fetch(`${resource}/models`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      signal: AbortSignal.timeout(requestTimeoutMs),
-    })
-    if (!response.ok) {
-      console.warn(`Could not list ChatGPT plan models (status ${response.status})`)
-      return
-    }
-    const models = ModelsResponseSchema.parse(await response.json()).data
-    const listed = models
-      .filter((model) => model.visibility === undefined || model.visibility === "list")
-      .map((model) => (model.slug === undefined ? model.id : `${model.id} (${model.slug})`))
-    console.info(`Models available on your ChatGPT plan: ${listed.join(", ")}`)
-  } catch (error) {
-    console.warn(`Could not list ChatGPT plan models: ${errorMessage(error)}`)
-  }
-}
-
-function postForm(url: string, fields: Record<string, string>): Promise<Response> {
-  return fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams(fields),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  })
-}
-
-async function readErrorCode(response: Response): Promise<string | undefined> {
-  const body: unknown = await response.json().catch(() => undefined)
-  if (typeof body !== "object" || body === null) return undefined
-  const error = (body as { error?: unknown }).error
-  if (typeof error === "string") return error
-  if (typeof error === "object" && error !== null) {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === "string") return code
-  }
-  return undefined
-}
-
-function hasPlanUsageScope(credentials: Credentials | undefined): boolean {
-  return credentials?.scopes.includes(planUsageScope) ?? false
-}
-
-function loadCredentials(path: string): Credentials | undefined {
-  if (!existsSync(path)) return undefined
-  try {
-    return CredentialsSchema.parse(JSON.parse(readFileSync(path, "utf8")))
-  } catch (error) {
-    console.warn(`Ignoring unreadable ${path}: ${errorMessage(error)}`)
-    return undefined
-  }
-}
-
-function loadHostId(dataDir: string): string {
-  const path = join(dataDir, "host.json")
-  if (existsSync(path)) {
-    try {
-      return HostSchema.parse(JSON.parse(readFileSync(path, "utf8"))).extAgentHostId
-    } catch (error) {
-      console.warn(`Regenerating unreadable ${path}: ${errorMessage(error)}`)
-    }
-  }
-  const extAgentHostId = `urn:uuid:${randomUUID()}`
-  writeFileSync(path, JSON.stringify({ extAgentHostId }), { mode: 0o600 })
-  return extAgentHostId
-}
-
-function openBrowser(url: string): void {
-  const command = browserCommand(url)
-  if (command === undefined) return
-  const child = spawn(command.file, command.args, { detached: true, stdio: "ignore" })
-  child.on("error", (error) => console.warn(`Could not open the browser: ${error.message}`))
-  child.unref()
-}
-
-function browserCommand(url: string): { file: string; args: string[] } | undefined {
-  switch (process.platform) {
-    case "darwin":
-      return { file: "open", args: [url] }
-    case "linux":
-      return { file: "xdg-open", args: [url] }
-    case "win32":
-      return { file: "cmd", args: ["/c", "start", '""', url] }
-    default:
-      return undefined
-  }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
