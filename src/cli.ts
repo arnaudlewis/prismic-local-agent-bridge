@@ -3,6 +3,8 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
 
+import { resolveUserClaudeHome } from "./agents/claude/claudeConfig.ts"
+import { createClaudeProvider } from "./agents/claude/claudeProvider.ts"
 import { createChatGptAuth } from "./agents/codex/chatgptAuth.ts"
 import { resolveUserCodexHome } from "./agents/codex/codexConfig.ts"
 import { createCodexProvider } from "./agents/codex/codexProvider.ts"
@@ -12,6 +14,7 @@ import type { AgentProvider } from "./agents/provider.ts"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
+import { createApiKeyVault, createDefaultSecretStore } from "./secrets/apiKeyVault.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
@@ -34,6 +37,7 @@ async function main(): Promise<void> {
 
   const project = resolveProjectDir({ explicit: options.project, dataDir })
   const userCodexHome = options.useUserCodex ? resolveUserCodexHome() : undefined
+  const userClaudeHome = options.useUserClaude ? resolveUserClaudeHome() : undefined
   if (options.forgetPairings) {
     forgetPairings(dataDir)
     console.info("Forgot all paired browsers: every browser must pair again.")
@@ -49,6 +53,11 @@ async function main(): Promise<void> {
       agentMode: options.agentMode,
       model: options.model,
       refreshMarginMs: options.refreshMarginMs,
+    }),
+    createClaudeProvider({
+      dataDir,
+      vault: createApiKeyVault({ store: await createDefaultSecretStore({ dataDir, name: "claude-api-key" }) }),
+      userClaudeHome,
     }),
   ]
   const channels = createWindowChannels()
@@ -71,7 +80,7 @@ async function main(): Promise<void> {
   console.info(`Listening on http://127.0.0.1:${options.port}`)
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
   for (const provider of providers) {
-    for (const line of provider.bannerLines()) console.info(line)
+    for (const line of await provider.bannerLines()) console.info(line)
   }
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
   console.info(`Pairing code: ${pairing.currentCode()}`)
@@ -91,6 +100,7 @@ interface CliOptions {
   model: string | undefined
   agentMode: AgentMode
   useUserCodex: boolean
+  useUserClaude: boolean
   forgetPairings: boolean
   refreshMarginMs: number
 }
@@ -104,6 +114,7 @@ function parseOptions(): CliOptions {
       model: { type: "string" },
       "agent-mode": { type: "string" },
       "use-user-codex": { type: "boolean" },
+      "use-user-claude": { type: "boolean" },
       "forget-pairings": { type: "boolean" },
     },
     strict: true,
@@ -131,6 +142,7 @@ function parseOptions(): CliOptions {
     model,
     agentMode,
     useUserCodex: values["use-user-codex"] ?? false,
+    useUserClaude: values["use-user-claude"] ?? false,
     forgetPairings: values["forget-pairings"] ?? false,
     refreshMarginMs,
   }

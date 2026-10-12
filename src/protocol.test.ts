@@ -60,6 +60,7 @@ describe("session.mcpServerUrl", () => {
 describe("thread messages", () => {
   it("accepts threads_list and chat_delete", () => {
     expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "codex" }).success).toBe(true)
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "claude" }).success).toBe(true)
     expect(
       ClientMessageSchema.safeParse({ type: "chat_delete", conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })
         .success,
@@ -93,6 +94,7 @@ describe("session.agent", () => {
 
   it("is required and must be a known agent", () => {
     expect(withAgent("codex")).toBe(true)
+    expect(withAgent("claude")).toBe(true)
     expect(withAgent(undefined)).toBe(false)
     expect(withAgent("gemini")).toBe(false)
     expect(withAgent("Codex")).toBe(false)

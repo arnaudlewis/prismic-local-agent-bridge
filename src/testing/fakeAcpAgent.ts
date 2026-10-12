@@ -2,9 +2,11 @@
 import { appendFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 
-const modeValues = ["read-only", "workspace-write", "agent", "agent-full-access"]
+// FAKE_AGENT_MODE_VALUES makes the mode option look like another agent's (Claude's modes, say): the first value is
+// where the session starts, which stands for the agent's own settings choosing a mode.
+const modeValues = process.env.FAKE_AGENT_MODE_VALUES?.split(",") ?? ["read-only", "workspace-write", "agent", "agent-full-access"]
 
-let mode = process.env.INITIAL_AGENT_MODE ?? "read-only"
+let mode = process.env.INITIAL_AGENT_MODE ?? modeValues[0] ?? "read-only"
 let collaborationMode = "default"
 
 function configOptions() {
@@ -31,7 +33,7 @@ function configOptions() {
   ]
 }
 
-const commandNames = ["status", "mcp", "plan", "compact", "rename", "logout", "review", "review-branch", "review-commit", "goal", "$skill"]
+const commandNames = process.env.FAKE_AGENT_COMMANDS?.split(",") ?? ["status", "mcp", "plan", "compact", "rename", "logout", "review", "review-branch", "review-commit", "goal", "$skill"]
 
 function notify(update: unknown): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "fake-session", update } })}\n`)
@@ -120,6 +122,22 @@ function handlePrompt(message: Message): void {
   }
   if (text.startsWith("fail-prompt")) {
     fail(message.id, text)
+    return
+  }
+  // "emit-claude-tool <server> <tool> <json>": an MCP call the way claude-agent-acp reports it: the tool is named
+  // mcp__<server>__<tool> (as name and title), the result comes back as content blocks with the name in _meta.
+  if (text.startsWith("emit-claude-tool ")) {
+    const [, server = "", tool = "", ...rest] = text.split(" ")
+    const name = `mcp__${server}__${tool}`
+    notify({ sessionUpdate: "tool_call", toolCallId: "claude-1", name, title: name, kind: "other", status: "pending", rawInput: {} })
+    notify({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "claude-1",
+      status: "completed",
+      _meta: { claudeCode: { toolName: name } },
+      content: [{ type: "content", content: { type: "text", text: rest.join(" ") } }],
+    })
+    respond(message.id, { stopReason: "end_turn" })
     return
   }
   // A tool call in a format codex-acp doesn't use: title "Prismic/<tool>" and rawOutput { json }.

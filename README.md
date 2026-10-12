@@ -21,6 +21,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
 | `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access`. |
 | `--forget-pairings` | off | Delete `pairing.json` at startup: every browser must pair again (see Pairing). |
+| `--use-user-claude` | off | Run Claude with your real Claude config directory (skills, CLAUDE.md, MCP servers), still billed on the API key only (see Claude). |
 | `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 
 Environment:
@@ -41,6 +42,26 @@ npm start -- --use-user-codex
 3. Pick a model and reasoning effort, then chat. The agent works in an empty private workspace unless you pass `--project <website folder>`; document access goes through the Prismic MCP either way.
 
 A paired browser stays paired across daemon restarts (see Pairing), and the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
+
+## Claude
+
+Claude runs through [`@agentclientprotocol/claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp) (the maintained successor of `@zed-industries/claude-code-acp`, which is deprecated), pinned in `package.json`. It supports HTTP MCP servers and `session/load`, so conversations, threads, resume and the per-turn editor context work as for Codex.
+
+**API key, not a subscription.** There is no "Sign in with Claude" for third-party apps: Claude is billed pay-per-token on your own Anthropic account with an API key (`sk-ant-…`). Your claude.ai subscription is never used: the agent runs with the key in its environment (which outranks any stored login), with `--hide-claude-auth` (it refuses any session or turn a subscription would pay for) and, by default, in an empty configuration directory of its own (`<data dir>/claude-home`, `CLAUDE_CONFIG_DIR`). The daemon's own `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, Bedrock/Vertex switches and `CLAUDE_CODE_EXECUTABLE` are not passed to the agent.
+
+**Where the key lives.** In the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) through `@napi-rs/keyring`. If there is no usable keychain, in `<data dir>/secrets/claude-api-key` (`0600`, directory `0700`, written atomically; symlinks are refused) and `/status` says `storage: "file"` so the UI can warn. If `ANTHROPIC_API_KEY` is set on the daemon it is used and is read-only (`storage: "env"`): it can't be changed or removed from the browser. The key is passed to the agent through its environment only (never on argv), and is never logged, written to transcripts or conversation files, put in an error or notice, or returned over the wire: `/status` has only `keyHint` (`…abcd`, its last 4 characters).
+
+**Managing the key** (Bearer pairing token, allowed Origin, JSON only, 4 KiB body):
+
+- `PUT /auth/claude/key` with `{ "key": "sk-ant-…" }`. The format is checked first (`400 {"error":"invalid_format"}`, the key is not echoed), then the key is validated with a cheap authenticated request to Anthropic (`GET https://api.anthropic.com/v1/models`, 5 s, no redirects): `400 {"error":"invalid_key"}` if refused, `502 {"error":"validation_unavailable"}` if Anthropic can't be reached. On success it is stored (replacing any key) and the answer is `204`. Attempts are limited to 5 a minute (`429 {"error":"too_many_attempts"}` with `Retry-After`), whatever they were, so the daemon can't be used to probe keys. `409 {"error":"managed_by_environment"}` when the key comes from the environment.
+- `DELETE /auth/claude/key` removes the key (`204`, also when there was none). Running Claude conversations are stopped at once (turn cancelled, approvals denied, the window sees an error notice and goes idle), and further prompts get the notice "Add your Anthropic API key to use Claude."
+- Replacing the key restarts running Claude agents lazily: a fingerprint of the key (a salted HMAC, never the key) is part of what an agent was started with, so the next prompt restarts it with the new key and resumes the conversation, never during a turn.
+
+**Modes and commands.** Every new Claude session starts in the `default` mode (which asks before acting), whatever the agent's own settings say: with `--use-user-claude` your `settings.json` may default to `bypassPermissions`, which would otherwise start the browser-driven agent without asking. The mode is a protected config option like Codex's (`preferredConfig.mode` is ignored; only an explicit `set_config_option` changes it). The model, effort and fast mode come as `session_config` options. The slash commands that are account-global, change settings or the permission policy for good, schedule autonomous work or start work outside the local sandbox are blocked (`/login`, `/logout`, `/config`, `/permissions`, `/update-config`, `/fewer-permission-prompts`, `/auto-mode-setup`, `/hooks`, `/sandbox`, `/add-dir`, `/plugin`, `/agents`, `/import`, `/goal`, `/loop`, `/schedule`, `/clear`, `/resume`, …; the full list is in `src/agents/claude/commands.ts`), and `/model`, `/effort` and `/fast` are not offered because the browser has controls for them. Claude Code only reads a message as a command when it starts with `/` and the name follows directly; the bridge blocks on that reading and on a more lenient one (leading whitespace, `/ name`, other case), so a difference can only over-block.
+
+**`--use-user-claude`.** Runs the agent with your real Claude config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`, which must exist): your skills, `CLAUDE.md`, MCP servers and settings, and the sessions it writes land there. The key is still the Anthropic API key above: your login is not used. The risks are the ones of `--use-user-codex`: an agent triggered from the browser can use every MCP server and tool you configured, under the approval mode the bridge starts it in.
+
+**Threat model additions.** The key never leaves the daemon (not in any event, history or file the browser can read), and a prompt injection can't read it from the agent: it is not in the transcript, and the agent's environment is the only other place it is. The paired browser can replace or delete the key (and so cut or redirect the billing of Claude), which is why those routes need the pairing token and an allowed origin and are rate limited. With the file fallback anyone who can read your files can read the key.
 
 ## Pairing
 
@@ -105,7 +126,7 @@ The daemon is split so that Codex is one agent among others: the conversation ma
 
 ```
 src/
-  cli.ts, bridgeServer.ts, httpUtils.ts   HTTP + WebSocket server, flags, banner, the provider registry
+  cli.ts, bridgeServer.ts, httpUtils.ts, channelKey.ts   HTTP + WebSocket server, flags, banner, the provider registry
   pairing.ts, windowChannels.ts           pairing tokens, one WebSocket channel per browser window
   agentSessions.ts                        facade: routes client messages to the conversation modules
   conversations/                          agent-agnostic machinery (plain functions over a shared Context)
@@ -120,16 +141,21 @@ src/
     provider.ts                           the AgentProvider interface
     codex/                                the Codex provider: codexProvider.ts, commands.ts, toolCalls.ts,
                                           codexConfig.ts, chatgptAuth.ts (+ oauth*.ts, credentialsFile.ts)
+    claude/                               the Claude provider: claudeProvider.ts, commands.ts, toolCalls.ts,
+                                          claudeConfig.ts, keyRoutes.ts, keyValidation.ts
+  secrets/                                the API key vault: OS keychain, private file fallback, env (read-only)
   conversationStore.ts, transcript.ts     persistence (files + thread index), bounded transcript
   editorContext*.ts                       parsing get_editor_context, building the context block
   protocol.ts                             wire schemas and types
 ```
 
-**Wire changes for several agents.** `session` (in `chat_open` and `chat_prompt`) has a required `agent` (`"codex"` for now), `threads_list` is `{ type, repository, agent }` and lists only that agent's conversations, and `GET /status` (Bearer) answers `{ "projectDir": string, "agents": { "codex": { "agentMode": string, "model"?: string, "account": { "kind": "chatgpt", "status": "signed_out" | "signing_in" | "signed_in", "email"?: string, "planUsage": boolean, "error"?: string } } } }`. The sign-in routes `/auth/chatgpt/start`, `/auth/chatgpt/sign-out` and `/auth/callback` are registered by the Codex provider. Everything else on the wire (`chat_history`, `threads`, events) is unchanged.
+**Wire for several agents.** `session` (in `chat_open` and `chat_prompt`) has a required `agent` (`"codex"` or `"claude"`), `threads_list` is `{ type, repository, agent }` and lists only that agent's conversations, and the WebSocket is `ws://127.0.0.1:7878/windows/<windowId>?token=<token>&agent=<id>` (no `agent` means `codex`; an unknown one is refused with 400). There is one socket per (window, agent): the Codex and Claude panels of one window don't evict each other, a message for another agent than its socket's is refused, and the MCP header `X-Prismic-Window-Id` stays the browser's window id.
 
-**The provider interface** (`src/agents/provider.ts`): `id` and `label`; `authenticate()` (returns the environment the child needs and a fingerprint that restarts a running agent when it changes, or throws `AgentAuthError` with the notice to show); `spawnSpec()` (command, arguments, environment); the command policy (`blockedCommands`, `hiddenCommands`, `nativeCommandName()` which must mirror the agent's own parsing, `protectedConfigIds`); how MCP tool calls are reported (`identifyToolCall()`, `readToolResult()`, used to catch `get_editor_context` results); `describePromptError()`, `sessionRestartedNotice`, `preambleAdditions()`; `getStatus()` and `bannerLines()`; and optional HTTP `routes()`.
+`GET /status` (Bearer) answers `{ "projectDir": string, "agents": { "codex": { "agentMode": string, "model"?: string, "account": { "kind": "chatgpt", "status": "signed_out" | "signing_in" | "signed_in", "email"?: string, "planUsage": boolean, "error"?: string } }, "claude": { "account": { "kind": "apiKey", "status": "missing" | "configured", "keyHint"?: "…abcd", "storage": "keychain" | "file" | "env", "error"?: string } } } }`. Claude has no daemon-wide `agentMode` or `model` (they are per session options). The sign-in routes `/auth/chatgpt/start`, `/auth/chatgpt/sign-out` and `/auth/callback` are registered by the Codex provider, the key routes `PUT` and `DELETE /auth/claude/key` by the Claude one (see Claude). Everything else on the wire (`chat_history`, `threads`, events) is unchanged.
 
-**Adding an agent** (say Claude): implement an `AgentProvider` in `src/agents/claude/`, add `"claude"` to `agentIds` in `protocol.ts` (one line: `session.agent` and `threads_list.agent` accept it, and stored conversations keep their agent), extend `AgentAccountStatus` in `protocol.ts` if its account isn't a ChatGPT one, and list the provider in the registry in `cli.ts`. The conversation modules need no change. Conversation files and index entries carry the agent; a conversation id belongs to one agent for good.
+**The provider interface** (`src/agents/provider.ts`): `id` and `label`; `authenticate()` (returns the environment the child needs and a fingerprint that restarts a running agent when it changes, or throws `AgentAuthError` with the notice to show); `spawnSpec()` (command, arguments, environment, and the daemon variables the child must not inherit); `initialConfig()` (the config of every new session, e.g. the starting mode; failing to apply it means no agent is started); `onCredentialsRemoved()` (running conversations are stopped at once); the command policy (`blockedCommands`, `hiddenCommands`, `nativeCommandName()` which must mirror the agent's own parsing, `commandNameCandidates()` for a more lenient reading that is checked against the blocklist, `protectedConfigIds`); how MCP tool calls are reported (`identifyToolCall()`, `readToolResult()`, used to catch `get_editor_context` results); `describePromptError()`, `sessionRestartedNotice`, `preambleAdditions()`; `getStatus()` and `bannerLines()`; and optional HTTP `routes()`.
+
+**Adding an agent** (Claude was added this way): implement an `AgentProvider` in `src/agents/<name>/`, add its id to `agentIds` in `protocol.ts` (one line: `session.agent`, `threads_list.agent` and the WebSocket `agent` accept it, and stored conversations keep their agent), extend `AgentAccountStatus` in `protocol.ts` if its account is of a new kind, and list the provider in the registry in `cli.ts`. The conversation modules need no change. Conversation files and index entries carry the agent; a conversation id belongs to one agent for good.
 
 What is still shaped by ACP, not by Codex: the machinery assumes an ACP agent that supports HTTP MCP servers and `session/load`, the `mode` / `model` config option ids (the model is re-applied first on restart), and the ACP tool call and permission notifications.
 
@@ -173,6 +199,7 @@ The first prompt of a conversation is preceded by a preamble that also holds an 
 - **The default workspace is empty, but it is not a boundary:** without `--project` the agent's working directory is `<data dir>/workspace`, which holds no project files. What the agent can read or write on disk is decided by the sandbox mode, not by the working directory: Codex's `read-only` mode can still read files outside the workspace.
 - **Full access is available by default** (a deliberate choice, with no CLI gate). It is selectable from the browser UI after its confirmation, it never asks for approvals, and it gives the agent unrestricted file and network access as the local user. Page and document content is untrusted, so a prompt injection can use it. `preferredConfig.mode` is ignored at `chat_open`: the mode only changes through an explicit `set_config_option`.
 - **`--use-user-codex`:** the agent uses your Codex home, config, hooks and MCP servers, and all their tools become reachable from the browser (see "Codex home").
+- **The Anthropic API key** (see Claude): it never leaves the daemon, the paired browser can replace or delete it, and prompt injection can't read it from the agent.
 - **Stored transcripts:** conversations are saved in plain text under `<data dir>/conversations/` (`0600`), so anyone who can read your files can read them. They are never logged, and `chat_delete` deletes them. A conversation is reachable by any paired window that knows its id; ids are random UUIDs.
 - **Blocked commands:** `/logout` is account-global (it would sign out Codex outside the bridge). `/review`, `/review-branch`, `/review-commit` and `/goal` start turns that codex-acp runs outside the bridge's agent mode, sandbox and approval policy. They are removed from the command list and rejected on incoming prompts.
 

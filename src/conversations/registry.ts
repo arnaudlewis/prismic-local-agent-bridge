@@ -1,11 +1,11 @@
 import { errorMessage } from "../errors.ts"
 import { editorContextKey } from "../editorContext.ts"
-import type { HistoryEvent, Session } from "../protocol.ts"
+import type { AgentId, HistoryEvent, Session } from "../protocol.ts"
 import { deriveTitle } from "../threadTitle.ts"
 import { createTranscript } from "../transcript.ts"
 import type { Context } from "./context.ts"
 import { evict, refreshIdleTimer } from "./idle.ts"
-import { flushSave, notify, scheduleSave, touch } from "./output.ts"
+import { flushSave, notify, scheduleSave, setStatus, touch } from "./output.ts"
 import { cancelPendingPermissions, stopAgent } from "./stop.ts"
 import type { Conversation } from "./types.ts"
 
@@ -153,6 +153,19 @@ export function sweepDetachedConversations(ctx: Context): void {
       scheduleSave(ctx, conversation)
       refreshIdleTimer(ctx, conversation)
     }
+  }
+}
+
+// The agent's credentials are gone: every conversation running on it is stopped at once (a turn is cancelled, its
+// approvals denied), told why, and its window sees it idle. The next prompt asks for the credentials again.
+export function stopProviderAgents(ctx: Context, agent: AgentId, notice: string): void {
+  for (const conversation of ctx.conversations.values()) {
+    if (conversation.agent !== agent || (conversation.process === undefined && !conversation.starting)) continue
+    stopAgent(ctx, conversation)
+    notify(ctx, conversation, "error", notice)
+    setStatus(ctx, conversation, "idle")
+    scheduleSave(ctx, conversation)
+    refreshIdleTimer(ctx, conversation)
   }
 }
 

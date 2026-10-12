@@ -164,26 +164,26 @@ describe("codex provider", () => {
     expect(provider.describePromptError?.(new Error("something else"))).toBeUndefined()
   })
 
-  it("reports its status for GET /status", () => {
+  it("reports its status for GET /status", async () => {
     const { provider } = createProvider({ model: "gpt-x", agentMode: "workspace-write" })
 
-    expect(provider.getStatus()).toEqual({
+    expect(await provider.getStatus()).toEqual({
       agentMode: "workspace-write",
       model: "gpt-x",
       account: { kind: "chatgpt", status: "signed_in", email: "me@example.com", planUsage: true },
     })
-    expect(createProvider().provider.getStatus()).not.toHaveProperty("model")
+    expect(await createProvider().provider.getStatus()).not.toHaveProperty("model")
   })
 
-  it("prints its banner lines", () => {
+  it("prints its banner lines", async () => {
     const { provider, dataDir } = createProvider({ model: "gpt-x" })
 
-    expect(provider.bannerLines()).toEqual([
+    expect(await provider.bannerLines()).toEqual([
       "Agent mode: read-only, model: gpt-x",
       `Codex home: ${join(dataDir, "codex-home")} (isolated)`,
       "ChatGPT: signed_in",
     ])
-    expect(createProvider({ userCodexHome: "/home/me/.codex" }).provider.bannerLines()[1]).toBe(
+    expect((await createProvider({ userCodexHome: "/home/me/.codex" }).provider.bannerLines())[1]).toBe(
       "Codex home: /home/me/.codex (user)",
     )
   })

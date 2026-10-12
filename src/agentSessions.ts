@@ -10,7 +10,7 @@ import {
 import type { Context } from "./conversations/context.ts"
 import { sendLive, sendToWindow } from "./conversations/output.ts"
 import { handlePermissionResponse } from "./conversations/permissions.ts"
-import { detachWindow, sweepDetachedConversations } from "./conversations/registry.ts"
+import { detachWindow, stopProviderAgents, sweepDetachedConversations } from "./conversations/registry.ts"
 import { stopConversation } from "./conversations/idle.ts"
 import { handleSetConfigOption } from "./conversations/sessionConfig.ts"
 import { handleChatDelete, handleThreadsList } from "./conversations/threads.ts"
@@ -128,6 +128,9 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     })
   })
   args.channels.onWindowClosed((windowId) => detachWindow(ctx, windowId))
+  for (const provider of args.providers) {
+    provider.onCredentialsRemoved?.((notice) => stopProviderAgents(ctx, provider.id, notice))
+  }
 
   return { handleMessage, detachWindow: (windowId) => detachWindow(ctx, windowId), stopAll }
 }

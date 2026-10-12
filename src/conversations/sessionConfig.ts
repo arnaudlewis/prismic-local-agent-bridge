@@ -61,6 +61,20 @@ function offersValue(options: SessionConfigOption[], configId: string, value: st
   return flattenSelectValues(option.options).some((candidate) => candidate.value === value)
 }
 
+// The provider's starting config for a new session. Unlike the user's own choices, a failure here is fatal: the
+// agent must not run in a mode other than the one the bridge decided on.
+export async function applyInitialConfig(initial: Record<string, string>, agent: AgentFields): Promise<void> {
+  for (const [configId, value] of Object.entries(initial)) {
+    const option = agent.configOptions.find((candidate) => candidate.id === configId)
+    if (option?.type === "select" && option.currentValue === value) continue
+    if (!offersValue(agent.configOptions, configId, value)) {
+      throw new Error(`The agent doesn't offer ${configId} = ${value}`)
+    }
+    const response = await agent.connection.setSessionConfigOption({ sessionId: agent.sessionId, configId, value })
+    agent.configOptions = response.configOptions
+  }
+}
+
 // Re-applies the conversation's choices to a fresh agent, the model first: effort values depend on it.
 export async function applySelectedConfig(conversation: Conversation, agent: AgentFields): Promise<void> {
   const entries = Object.entries(conversation.selectedConfig).sort(

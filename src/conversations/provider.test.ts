@@ -4,6 +4,7 @@ import { AgentAuthError } from "../agents/provider.ts"
 import {
   chatHistory,
   createHarness,
+  fakeAgentBin,
   liveAgentText,
   notices,
   session,
@@ -253,5 +254,57 @@ describe("channels keyed by window and agent", () => {
 
     expect(liveAgentText(harness.events)).toContain(`ctx:new:${browserWindow}`)
     expect(liveAgentText(harness.events)).not.toContain("/codex:")
+  })
+})
+
+describe("provider hooks the Claude agent needs", () => {
+  it("lets a provider read the command more leniently than the agent, and blocks on any reading", async () => {
+    const harness = createHarness({
+      providerOverrides: {
+        blockedCommands: ["logout"],
+        nativeCommandName: (text) => (text.startsWith("/") ? text.slice(1).split(/\s/)[0] : undefined),
+        commandNameCandidates: (text) => [text.replace(/^\s*\/\s*/, "").split(/\s/)[0] ?? ""],
+      },
+    })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    harness.events.length = 0
+
+    await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: " / logout", session })
+
+    expect(notices(harness.events)).toEqual(["The /logout command isn't available in the local agent."])
+  })
+
+  it("applies the provider's initial config to a new session only, and starts no agent if it can't be applied", async () => {
+    const harness = createHarness({ providerOverrides: { initialConfig: () => ({ mode: "agent" }) } })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    const config = harness.events.findLast((event) => event.type === "session_config")
+    expect(config?.type === "session_config" && config.options.find((option) => option.id === "mode")?.currentValue).toBe("agent")
+
+    const refusing = createHarness({ providerOverrides: { initialConfig: () => ({ mode: "no-such-mode" }) } })
+    await refusing.agents.handleMessage(windowId, { type: "chat_open", session })
+    expect(notices(refusing.events)).toEqual(["Couldn't start the local agent: The agent doesn't offer mode = no-such-mode"])
+    expect(refusing.events.some((event) => event.type === "session_config")).toBe(false)
+  })
+
+  it("does not pass the variables a provider says the child must not inherit", async () => {
+    process.env.FAKE_AGENT_INHERITED = "from-the-daemon"
+    process.env.FAKE_AGENT_KEPT = "also-from-the-daemon"
+    try {
+      const harness = createHarness({
+        providerOverrides: {
+          spawnSpec: () => ({ command: process.execPath, args: [fakeAgentBin], env: {}, removeEnv: ["FAKE_AGENT_INHERITED"] }),
+        },
+      })
+      await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+      harness.events.length = 0
+
+      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "echo-env FAKE_AGENT_INHERITED", session })
+      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "echo-env FAKE_AGENT_KEPT", session })
+
+      expect(liveAgentText(harness.events)).toBe("env:FAKE_AGENT_INHERITED=env:FAKE_AGENT_KEPT=also-from-the-daemon")
+    } finally {
+      delete process.env.FAKE_AGENT_INHERITED
+      delete process.env.FAKE_AGENT_KEPT
+    }
   })
 })

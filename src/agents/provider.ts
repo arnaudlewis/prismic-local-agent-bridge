@@ -15,6 +15,10 @@ export interface AgentProvider {
   readonly hiddenCommands: readonly string[]
   // Config option ids the browser may not set when opening a chat (only through an explicit set_config_option).
   readonly protectedConfigIds: readonly string[]
+  // Config applied to every NEW agent session before anything else (a resumed one keeps its own). It makes the
+  // starting mode the bridge's choice rather than whatever the agent's own settings say. If it can't be applied, the
+  // agent is not started: a mode that is too permissive must never be the fallback.
+  initialConfig?(): Record<string, string>
   // Notice sent when a stored agent session can't be resumed and a new one starts.
   readonly sessionRestartedNotice: string
 
@@ -27,6 +31,10 @@ export interface AgentProvider {
   // The native slash command a prompt would run inside the agent (lowercased), or undefined when the agent would
   // not treat it as one. This MUST mirror the agent's own parsing: it is what the blocklist is checked against.
   nativeCommandName(text: string): string | undefined
+  // Every command name the text could run under a more lenient reading than the agent's own (odd whitespace, case).
+  // They are all checked against the blocklist, so a parsing difference can only over-block, never let a command by.
+  // Defaults to nativeCommandName.
+  commandNameCandidates?(text: string): string[]
   // MCP tool calls as the agent reports them (identity of a call, and its result once finished), used to catch
   // the result of get_editor_context.
   identifyToolCall(update: ToolUpdate): ToolIdentity | undefined
@@ -37,9 +45,12 @@ export interface AgentProvider {
   preambleAdditions?(): string[]
 
   // The agent's part of GET /status.
-  getStatus(): AgentStatus
+  getStatus(): AgentStatus | Promise<AgentStatus>
   // Startup banner lines.
-  bannerLines(): string[]
+  bannerLines(): string[] | Promise<string[]>
+  // Called once with a listener; the provider calls it when its credentials were removed, with the notice to show.
+  // The conversations running on that agent are stopped at once (turns cancelled, approvals denied).
+  onCredentialsRemoved?(listener: (notice: string) => void): void
   // HTTP routes of its own (sign-in flows, ...).
   routes?(): ProviderRoute[]
 }
@@ -55,11 +66,15 @@ export interface AgentSpawnSpec {
   command: string
   args: string[]
   env: Record<string, string>
+  // Variables of the daemon's own environment the child must NOT inherit (another credential, another endpoint).
+  removeEnv?: string[]
 }
 
 export interface ToolUpdate {
   toolCallId: string
+  name?: string | null
   title?: string | null
+  _meta?: unknown
   status?: string | null
   rawInput?: unknown
   rawOutput?: unknown
@@ -67,7 +82,7 @@ export interface ToolUpdate {
 }
 
 export interface ProviderRoute {
-  method: "GET" | "POST"
+  method: "GET" | "POST" | "PUT" | "DELETE"
   path: string
   // "bearer" needs a paired browser's token; "none" is for redirects coming back from a sign-in page.
   auth: "bearer" | "none"

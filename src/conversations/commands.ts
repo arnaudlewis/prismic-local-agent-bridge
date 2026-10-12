@@ -16,10 +16,12 @@ export function offeredCommands(provider: AgentProvider, commands: AvailableComm
     .filter((command) => !provider.hiddenCommands.includes(command.name.toLowerCase()))
 }
 
-// The name of a blocked native command the prompt would run, so that it is not forwarded.
+// The name of a blocked native command the prompt would run, so that it is not forwarded. Every reading the provider
+// offers is checked: a parsing difference with the agent can only over-block.
 export function blockedCommandName(provider: AgentProvider, text: string): string | undefined {
-  const name = provider.nativeCommandName(text)
-  return name !== undefined && provider.blockedCommands.includes(name) ? name : undefined
+  const native = provider.nativeCommandName(text)
+  const candidates = provider.commandNameCandidates?.(text) ?? (native === undefined ? [] : [native])
+  return [...candidates, ...(native === undefined ? [] : [native])].find((name) => provider.blockedCommands.includes(name))
 }
 
 // Native commands run inside the agent and never reach the model: no editor context, no preamble.

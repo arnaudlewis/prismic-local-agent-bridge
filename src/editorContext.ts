@@ -214,7 +214,16 @@ function withWindowDocument(summary: EditorContextSummary, document: WindowDocum
 // ACP content blocks. structuredContent is used when the text isn't JSON.
 export function extractToolResultJson(update: { rawOutput?: unknown; content?: unknown }): unknown {
   const output = update.rawOutput
-  if (typeof output === "object" && output !== null) {
+  // Some agents report the bare content of the tool result: text blocks, or the text itself.
+  if (Array.isArray(output)) {
+    const fromBlocks = parseFirstJsonText(textBlocks(output))
+    if (fromBlocks !== undefined) return fromBlocks
+  }
+  if (typeof output === "string") {
+    const fromText = parseFirstJsonText([output])
+    if (fromText !== undefined) return fromText
+  }
+  if (typeof output === "object" && output !== null && !Array.isArray(output)) {
     const { result, error } = output as { result?: unknown; error?: unknown }
     if (error !== null && error !== undefined) return undefined
     if (typeof result === "object" && result !== null) {

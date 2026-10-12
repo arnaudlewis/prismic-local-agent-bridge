@@ -97,7 +97,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     if (method === "GET" && url.pathname === "/status") {
       requireToken(req, pairing)
       const agents: StatusResponse["agents"] = {}
-      for (const provider of providers) agents[provider.id] = provider.getStatus()
+      for (const provider of providers) agents[provider.id] = await provider.getStatus()
       const status: StatusResponse = { projectDir, agents }
       sendJson(res, 200, status)
       return
