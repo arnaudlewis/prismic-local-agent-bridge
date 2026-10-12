@@ -147,7 +147,7 @@ describe("createConversationStore", () => {
 
     it("ignores a file of an agent this daemon doesn't know, like any corrupt file", () => {
       const { dataDir, store } = createStore()
-      writeRaw(dataDir, conversationId, { ...stored(), agent: "claude" })
+      writeRaw(dataDir, conversationId, { ...stored(), agent: "gemini" })
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
 
       expect(store.load(conversationId)).toBeUndefined()

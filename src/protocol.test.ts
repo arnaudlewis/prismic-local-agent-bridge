@@ -94,7 +94,7 @@ describe("session.agent", () => {
   it("is required and must be a known agent", () => {
     expect(withAgent("codex")).toBe(true)
     expect(withAgent(undefined)).toBe(false)
-    expect(withAgent("claude")).toBe(false)
+    expect(withAgent("gemini")).toBe(false)
     expect(withAgent("Codex")).toBe(false)
     expect(withAgent("")).toBe(false)
     expect(withAgent(1)).toBe(false)
@@ -114,6 +114,6 @@ describe("session.agent", () => {
   it("is required on threads_list, which lists only that agent's conversations", () => {
     expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "codex" }).success).toBe(true)
     expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo" }).success).toBe(false)
-    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "claude" }).success).toBe(false)
+    expect(ClientMessageSchema.safeParse({ type: "threads_list", repository: "repo", agent: "gemini" }).success).toBe(false)
   })
 })
