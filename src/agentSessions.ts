@@ -36,6 +36,10 @@ interface CreateAgentSessionsArgs {
   dataDir: string
   // Set with --use-user-codex: run against this existing Codex home instead of an isolated one.
   userCodexHome: string | undefined
+  // Without it, the agent-full-access mode can't be selected from the browser.
+  allowFullAccess: boolean
+  // Overrides the codex-acp entry point; only tests pass it.
+  agentBin?: string
   projectDir: string
   agentMode: AgentMode
   model: string | undefined
@@ -100,7 +104,8 @@ interface AgentExitArgs {
 class StartAbortedError extends Error {}
 
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
-  const { channels, auth, dataDir, userCodexHome, projectDir, agentMode, model, refreshMarginMs } = args
+  const { channels, auth, dataDir, userCodexHome, allowFullAccess, agentBin, projectDir, agentMode, model, refreshMarginMs } =
+    args
   const states = new Map<string, WindowState>()
 
   function send(windowId: string, event: BridgeEvent): void {
@@ -121,7 +126,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   function sendSessionConfig(windowId: string, agent: AgentFields): void {
-    send(windowId, { type: "session_config", options: toBridgeConfigOptions(agent.configOptions) })
+    const options = toBridgeConfigOptions(agent.configOptions)
+    send(windowId, { type: "session_config", options: allowFullAccess ? options : options.map(withoutFullAccess) })
   }
 
   function sendAvailableCommands(windowId: string, agent: AgentFields): void {
@@ -154,7 +160,9 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   async function handleChatOpen(windowId: string, message: Extract<ClientMessage, { type: "chat_open" }>) {
     const state = getState(windowId)
     if (Object.keys(state.selectedConfig).length === 0 && message.preferredConfig !== undefined) {
-      state.selectedConfig = { ...message.preferredConfig }
+      // The mode is a security setting: a page must not be able to change it just by opening the chat.
+      const { mode: _ignoredMode, ...preferredConfig } = message.preferredConfig
+      state.selectedConfig = preferredConfig
     }
     send(windowId, { type: "chat_status", status: "starting" })
     const before = state.agent
@@ -213,6 +221,11 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const agent = states.get(windowId)?.agent
     if (agent === undefined) {
       sendNotice(windowId, "info", "The local agent isn't running yet.")
+      return
+    }
+    if (!allowFullAccess && isFullAccessRequest(message.configId, message.value)) {
+      sendNotice(windowId, "error", fullAccessDisabledNotice)
+      sendSessionConfig(windowId, agent)
       return
     }
     if (agent.turnActive) {
@@ -325,7 +338,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       userCodexHome === undefined
         ? { CODEX_HOME: writeCodexHome({ dataDir, model }) }
         : { CODEX_HOME: userCodexHome, CODEX_CONFIG: buildCodexConfigEnv({ model }) }
-    const child = spawn(process.execPath, [resolveCodexAcpBin()], {
+    const child = spawn(process.execPath, [agentBin ?? resolveCodexAcpBin()], {
       cwd: projectDir,
       stdio: ["pipe", "pipe", "inherit"],
       env: {
@@ -610,6 +623,19 @@ export function toBridgeCommand(command: AvailableCommand): BridgeCommand {
 
 export function isSlashCommand(text: string): boolean {
   return /^\/[A-Za-z][\w-]*(\s|$)/.test(text.trim())
+}
+
+const fullAccessValue = "agent-full-access"
+
+const fullAccessDisabledNotice = "Full access is disabled. Restart the bridge with --allow-full-access to enable it."
+
+function isFullAccessRequest(configId: string, value: string): boolean {
+  return configId === "mode" && value === fullAccessValue
+}
+
+export function withoutFullAccess(option: BridgeConfigOption): BridgeConfigOption {
+  if (option.id !== "mode") return option
+  return { ...option, values: option.values.filter((entry) => entry.value !== fullAccessValue) }
 }
 
 function toBridgeConfigOptions(options: SessionConfigOption[]): BridgeConfigOption[] {

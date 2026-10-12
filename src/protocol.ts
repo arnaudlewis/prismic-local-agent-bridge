@@ -2,7 +2,7 @@ import { z } from "zod"
 
 export const bridgeInfo = { name: "prismic-local-agent-bridge", version: "0.0.0" }
 
-export const agentModes = ["read-only", "workspace-write", "agent"] as const
+export const agentModes = ["read-only", "workspace-write", "agent", "agent-full-access"] as const
 
 export type AgentMode = (typeof agentModes)[number]
 

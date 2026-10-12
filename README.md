@@ -19,7 +19,8 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--port` | `7878` | Listening port. |
 | `--origin` | `http://localhost:5173` | Allowed browser origin. Repeatable. |
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
-| `--agent-mode` | `read-only` | `read-only`, `workspace-write` or `agent`. |
+| `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access` (the last one needs `--allow-full-access`). |
+| `--allow-full-access` | off | Let the browser select the `agent-full-access` mode (see below). |
 | `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 
 Environment:
@@ -58,6 +59,12 @@ Risks of `--use-user-codex`:
 - Sessions are written into your Codex home (`sessions/`).
 - If your `config.toml` defines an MCP server named `prismic`, codex-acp keeps yours and silently drops the bridge's window-bound one.
 - If your own `model` isn't available on the ChatGPT plan, turns fail until you pick another model in the panel or pass `--model`.
+
+## Agent mode and full access
+
+The mode (`mode` config option) starts from `--agent-mode` for every new session. A page can't change it when opening the chat: the `mode` key of `preferredConfig` is ignored. Only an explicit `set_config_option` changes it (and it survives agent restarts until `chat_reset`).
+
+The `agent-full-access` mode (unrestricted file and network access) is disabled by default, because a page open in the browser can contain untrusted content. Without `--allow-full-access` the bridge removes that value from the `mode` option in every `session_config`, and answers a `set_config_option` for it with the notice "Full access is disabled. Restart the bridge with --allow-full-access to enable it." The banner shows `Full access: allowed` or `Full access: disabled`.
 
 ## Slash commands and skills
 
