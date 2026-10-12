@@ -396,6 +396,18 @@ describe("signOut", () => {
     expect(storedServer(store)?.refreshToken).toBeUndefined()
   })
 
+  it("signs out of every environment at once, revoking its refresh token", async () => {
+    const store = createMemorySecretStore()
+    const auth = await newAuth({ store })
+    await signIn(auth)
+    const refreshToken = storedRefreshToken(store)
+
+    await auth.signOutEverywhere()
+
+    expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+    expect(stub.requestsTo("/revoke").map((request) => new URLSearchParams(request.body).get("token"))).toEqual([refreshToken])
+  })
+
   it("is complete even when the server can't be reached to revoke", async () => {
     const store = createMemorySecretStore()
     const auth = await newAuth({ store })

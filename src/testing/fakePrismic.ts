@@ -51,6 +51,10 @@ export function createFakePrismic(args: { accessToken?: string; userId?: string;
       userId = undefined
       return Promise.resolve()
     },
+    signOutEverywhere() {
+      userId = undefined
+      return Promise.resolve()
+    },
     signOutIfRejected(_mcpOrigin, rejectedToken) {
       if (rejectedToken !== accessToken) return Promise.resolve(false)
       userId = undefined

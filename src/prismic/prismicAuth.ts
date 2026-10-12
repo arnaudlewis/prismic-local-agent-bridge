@@ -43,6 +43,8 @@ export interface PrismicAuth {
   // PrismicSignInRequiredError.
   refreshAfterUnauthorized(mcpOrigin: string, rejectedToken: string): Promise<string>
   signOut(mcpOrigin: string): Promise<void>
+  // Signs out of every Prismic environment this daemon holds a sign-in for.
+  signOutEverywhere(): Promise<void>
   // Signs out only when the stored access token is still `rejectedToken` (the server refused it even after a
   // refresh); resolves false, leaving a newer sign-in alone, otherwise.
   signOutIfRejected(mcpOrigin: string, rejectedToken: string): Promise<boolean>
@@ -435,6 +437,11 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
     }
   }
 
+  // For the desktop app, which doesn't know which Prismic environments the paired browsers use.
+  async function signOutEverywhere(): Promise<void> {
+    for (const mcpOrigin of [...servers.keys()]) await signOut(mcpOrigin)
+  }
+
   // The server refused `rejectedToken` even after a refresh. Only a sign-in that still holds that token is ended: a
   // newer one (another sign-in or refresh finished meanwhile) is left alone.
   async function signOutIfRejected(mcpOrigin: string, rejectedToken: string): Promise<boolean> {
@@ -450,6 +457,7 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
     accessToken,
     refreshAfterUnauthorized,
     signOut,
+    signOutEverywhere,
     signOutIfRejected,
     knownTokens: () => [...seenTokens],
   }

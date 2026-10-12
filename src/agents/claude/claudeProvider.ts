@@ -1,3 +1,6 @@
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 import { AgentAuthError } from "../provider.ts"
 import type { AgentCredentials, AgentProvider } from "../provider.ts"
 import type { AgentRuntime } from "../agentRuntime.ts"
@@ -108,7 +111,8 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     describePromptError(error) {
       const message = error instanceof Error ? error.message : String(error)
       if (useClaudeCodeLogin && /authentication required|authentication_error|not logged in|please run \/login/i.test(message)) {
-        return "Claude Code isn't signed in on this computer. Run claude in a terminal, sign in with /login, then try again."
+        const checked = userClaudeHome ?? join(homedir(), ".claude")
+        return `Claude Code isn't signed in on this computer (checked ${checked}). Run claude in a terminal, sign in with /login, then try again. If you sign in somewhere else, start the bridge with CLAUDE_CONFIG_DIR and --use-user-claude.`
       }
       // claude-agent-acp answers a rejected key (or a signed-out CLI) with an "Authentication required" error.
       if (/authentication required|invalid x-api-key|authentication_error|invalid api key/i.test(message)) {

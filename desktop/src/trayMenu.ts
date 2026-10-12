@@ -2,7 +2,7 @@ import { join } from "node:path"
 import { Menu, Tray, app, nativeImage, shell } from "electron"
 import type { MenuItemConstructorOptions, NativeImage } from "electron"
 
-import type { BridgeProcess, BridgeState } from "./bridgeProcess.ts"
+import type { BridgeProcess, BridgeState, SignOutAccount } from "./bridgeProcess.ts"
 import type { AvailableUpdate } from "./updateCheck.ts"
 
 interface CreateTrayMenuArgs {
@@ -10,6 +10,9 @@ interface CreateTrayMenuArgs {
   getUpdate: () => AvailableUpdate | undefined
   // Demo only: Claude on the Claude Code login of this Mac.
   claudeCodeLogin: { isEnabled: () => boolean; toggle: () => void }
+  // Asks the user to confirm, then signs the daemon out of that OAuth account.
+  signOut: (account: SignOutAccount) => void
+  checkForUpdates: () => void
 }
 
 export interface TrayMenu {
@@ -23,7 +26,7 @@ function loadIcon(name: IconName): NativeImage {
 }
 
 export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
-  const { bridge, getUpdate, claudeCodeLogin } = args
+  const { bridge, getUpdate, claudeCodeLogin, signOut, checkForUpdates } = args
   // Colored images, not template ones: a template image is tinted by the menu bar and can't be orange or green. @2x is
   // picked up automatically.
   const icons: Record<IconName, NativeImage> = {
@@ -61,6 +64,13 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
           refresh()
         },
       },
+      {
+        label: "Sign Out",
+        submenu: [
+          { label: "Sign out of Prismic…", click: () => signOut("prismic") },
+          { label: "Sign out of ChatGPT…", click: () => signOut("chatgpt") },
+        ],
+      },
     ]
     if (update !== undefined) {
       items.push({
@@ -68,7 +78,11 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
         click: () => void shell.openExternal(update.downloadUrl),
       })
     }
-    items.push({ type: "separator" }, { label: "Quit Prismic Agent", click: () => app.quit() })
+    items.push(
+      { label: "Check for Updates…", click: () => checkForUpdates() },
+      { type: "separator" },
+      { label: "Quit Prismic Agent", click: () => app.quit() },
+    )
     tray.setContextMenu(Menu.buildFromTemplate(items))
   }
 

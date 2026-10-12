@@ -22,7 +22,10 @@ export interface CreateBridgeProcessArgs {
   onChange: (state: BridgeState) => void
 }
 
+export type SignOutAccount = "prismic" | "chatgpt"
+
 export interface BridgeProcess {
+  signOut(account: SignOutAccount): Promise<boolean>
   start(): void
   stop(): Promise<void>
   restart(): Promise<void>
@@ -37,6 +40,7 @@ const healthUrl = "http://127.0.0.1:7878/health"
 const healthName = "prismic-local-agent-bridge"
 const healthIntervalMs = 500
 const maxHealthBytes = 1024
+const signOutTimeoutMs = 15_000
 const healthTimeoutMs = 1000
 const portRetryMs = 30_000
 const stableAfterMs = 60_000
@@ -51,6 +55,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
   let retryTimer: NodeJS.Timeout | undefined
   let stopRequested = false
   let crashes = 0
+  const signOutWaiters = new Map<SignOutAccount, (ok: boolean) => void>()
 
   function setState(next: BridgeState): void {
     state = next
@@ -110,6 +115,11 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     spawned.on("exit", onGone)
     spawned.on("error", () => onGone(null))
     spawned.on("message", (message) => {
+      const signedOut = readSignedOut(message)
+      if (signedOut !== undefined) {
+        signOutWaiters.get(signedOut.account)?.(signedOut.ok)
+        return
+      }
       const reported = readEditors(message)
       if (reported === undefined) return
       editors = reported
@@ -133,8 +143,25 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     return promise.finally(() => clearTimeout(killTimer))
   }
 
+  // Asks the daemon to sign out of an OAuth account and waits for its answer.
+  function signOut(account: SignOutAccount): Promise<boolean> {
+    const running = child
+    if (running === undefined || !running.connected) return Promise.resolve(false)
+    const { promise, resolve } = Promise.withResolvers<boolean>()
+    signOutWaiters.set(account, resolve)
+    running.send({ type: "sign_out", account }, (error) => {
+      if (error !== null) resolve(false)
+    })
+    const timer = setTimeout(() => resolve(false), signOutTimeoutMs)
+    return promise.finally(() => {
+      clearTimeout(timer)
+      signOutWaiters.delete(account)
+    })
+  }
+
   return {
     start,
+    signOut,
     stop,
     async restart() {
       await stop()
@@ -192,4 +219,15 @@ function readEditors(message: unknown): string[] | undefined {
   const { origins } = message
   if (!Array.isArray(origins) || !origins.every((origin) => typeof origin === "string")) return undefined
   return origins
+}
+
+// The daemon's answer to a sign_out request (src/cli.ts).
+function readSignedOut(message: unknown): { account: SignOutAccount; ok: boolean } | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "signed_out" || !("account" in message) || !("ok" in message)) {
+    return undefined
+  }
+  const { account, ok } = message
+  if ((account !== "prismic" && account !== "chatgpt") || typeof ok !== "boolean") return undefined
+  return { account, ok }
 }

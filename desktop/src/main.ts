@@ -2,12 +2,12 @@ import { join } from "node:path"
 import { Notification, app, dialog, shell } from "electron"
 
 import { createBridgeProcess } from "./bridgeProcess.ts"
-import type { BridgeState } from "./bridgeProcess.ts"
+import type { BridgeState, SignOutAccount } from "./bridgeProcess.ts"
 import { createStateStore } from "./state.ts"
 import type { StateStore } from "./state.ts"
 import { createTrayMenu } from "./trayMenu.ts"
 import type { TrayMenu } from "./trayMenu.ts"
-import { startUpdateChecks } from "./updateCheck.ts"
+import { checkForUpdate, startUpdateChecks } from "./updateCheck.ts"
 import type { AvailableUpdate } from "./updateCheck.ts"
 import { isNewerVersion } from "./version.ts"
 
@@ -71,6 +71,8 @@ function run(): void {
       bridge,
       getUpdate: () => update,
       claudeCodeLogin: { isEnabled: () => state?.get().claudeCodeLogin === true, toggle: () => void toggleClaudeCodeLogin() },
+      signOut: (account) => void confirmAndSignOut(account),
+      checkForUpdates: () => void checkForUpdatesNow(),
     })
     bridge.start()
     startUpdateChecks({ currentVersion: app.getVersion(), onUpdate: onUpdateFound })
@@ -97,6 +99,58 @@ function run(): void {
     })
     notification.on("click", () => void shell.openExternal(found.downloadUrl))
     notification.show()
+  }
+
+  async function confirmAndSignOut(account: SignOutAccount): Promise<void> {
+    const label = account === "prismic" ? "Prismic" : "ChatGPT"
+    const { response } = await dialog.showMessageBox({
+      type: "question",
+      message: `Sign out of ${label}?`,
+      detail:
+        account === "prismic"
+          ? "The agents can't read or edit your content until you sign in to Prismic again from the Page Builder."
+          : "Codex stops working until you sign in with ChatGPT again from the Page Builder.",
+      buttons: ["Sign Out", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    })
+    if (response !== 0) return
+    if (await bridge.signOut(account)) {
+      new Notification({ title: `Signed out of ${label}` }).show()
+      return
+    }
+    await dialog.showMessageBox({
+      type: "error",
+      message: `Couldn't sign out of ${label}`,
+      detail: "Check that Prismic Agent is running (the menu says so), then try again.",
+    })
+  }
+
+  async function checkForUpdatesNow(): Promise<void> {
+    const result = await checkForUpdate(app.getVersion())
+    if (result.kind === "failed") {
+      await dialog.showMessageBox({ type: "error", message: "Couldn't check for updates", detail: result.reason })
+      return
+    }
+    if (result.kind === "up_to_date") {
+      await dialog.showMessageBox({
+        type: "info",
+        message: "Prismic Agent is up to date",
+        detail: `Version ${app.getVersion()} is the latest.`,
+      })
+      return
+    }
+    update = result.update
+    tray?.refresh()
+    const { response } = await dialog.showMessageBox({
+      type: "info",
+      message: `Prismic Agent ${result.update.version} is available`,
+      detail: "Download it, open it and drag it over the old one in Applications.",
+      buttons: ["Download", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (response === 0) void shell.openExternal(result.update.downloadUrl)
   }
 
   async function toggleClaudeCodeLogin(): Promise<void> {

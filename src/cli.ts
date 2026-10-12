@@ -65,12 +65,13 @@ async function main(): Promise<void> {
     console.info("Forgot all paired browsers: every browser must pair again.")
   }
   const pairing = createPairing({ dataDir })
+  const chatgptAuth = createChatGptAuth({ dataDir, redirectUri: `http://127.0.0.1:${options.port}/auth/callback` })
   // The agent registry: each provider is one agent a browser can pick with `session.agent`. To add one, implement
   // AgentProvider (src/agents/provider.ts), add its id to `agentIds` in protocol.ts and list it here.
   const providers: AgentProvider[] = [
     createCodexProvider({
       dataDir,
-      auth: createChatGptAuth({ dataDir, redirectUri: `http://127.0.0.1:${options.port}/auth/callback` }),
+      auth: chatgptAuth,
       userCodexHome,
       agentMode: options.agentMode,
       model: options.model,
@@ -94,6 +95,17 @@ async function main(): Promise<void> {
     if (process.connected) process.send?.({ type: "editors", origins })
   })
   const prismicAuth = await createPrismicAuth({ dataDir, port: options.port })
+  // The desktop app signs the daemon out of its OAuth accounts from its menu, over the same private IPC channel.
+  process.on("message", (message) => {
+    const account = readSignOutRequest(message)
+    if (account === undefined) return
+    const signedOut = account === "prismic" ? prismicAuth.signOutEverywhere() : chatgptAuth.signOut()
+    void signedOut
+      .then(() => true, () => false)
+      .then((ok) => {
+        if (process.connected) process.send?.({ type: "signed_out", account, ok })
+      })
+  })
   const upstream = createMcpUpstream({ auth: prismicAuth })
   const grants = createAgentMcpGrants()
   const agents = createAgentSessions({
@@ -162,6 +174,13 @@ function exitWhenPortInUse(error: unknown, port: number): never {
   if ((error as NodeJS.ErrnoException | null)?.code !== "EADDRINUSE") throw error
   console.error(`Port ${port} is already in use (is another Prismic agent bridge running?)`)
   process.exit(portInUseExitCode)
+}
+
+// A message of the desktop app asking to sign out of an OAuth account (desktop/src/bridgeProcess.ts).
+function readSignOutRequest(message: unknown): "prismic" | "chatgpt" | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "sign_out" || !("account" in message)) return undefined
+  return message.account === "prismic" || message.account === "chatgpt" ? message.account : undefined
 }
 
 interface CliOptions {
