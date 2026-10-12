@@ -19,18 +19,18 @@ export function redactText(text: string, secrets: readonly string[]): string {
   return result.replace(keyShape, redactedMarker)
 }
 
-// Every string in an event, at any depth. The events are plain data: no cycles, no classes.
-function redactValue<T>(value: T, secrets: readonly string[]): T {
+// Every string in a value, at any depth. The events are plain data: no cycles, no classes.
+export function redactDeep<T>(value: T, secrets: readonly string[]): T {
   if (typeof value === "string") return redactText(value, secrets) as T
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets)) as T
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, secrets)) as T
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactValue(item, secrets)])) as T
+    return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactDeep(item, secrets)])) as T
   }
   return value
 }
 
 export function redactEvent<T extends BridgeEvent | HistoryEvent>(event: T, secrets: readonly string[]): T {
-  return redactValue(event, secrets)
+  return redactDeep(event, secrets)
 }
 
 // No key is longer than this (the format check in the key route allows 400 characters after the prefix).

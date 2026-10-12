@@ -7,12 +7,14 @@ import type { Conversation } from "./types.ts"
 
 const saveDebounceMs = 500
 
+// Every event to a browser window ends here, and is redacted once more: stored history, thread titles and anything
+// else that didn't go through emit() can hold a key the daemon only learned about later.
 export function sendToWindow(ctx: Context, windowId: string, event: BridgeEvent): void {
-  ctx.channels.send(windowId, event)
+  ctx.channels.send(windowId, redactEvent(event, knownSecrets(ctx)))
 }
 
 export function sendLive(ctx: Context, conversation: Conversation, event: BridgeEvent): void {
-  if (conversation.windowId !== undefined) ctx.channels.send(conversation.windowId, event)
+  if (conversation.windowId !== undefined) sendToWindow(ctx, conversation.windowId, event)
 }
 
 export function touch(ctx: Context, conversation: Conversation): void {

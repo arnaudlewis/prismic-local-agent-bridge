@@ -69,7 +69,15 @@ export interface ConversationStore {
   pruneOldFiles(now: number): void
 }
 
-export function createConversationStore(args: { dataDir: string }): ConversationStore {
+interface CreateConversationStoreArgs {
+  dataDir: string
+  // Takes secrets out of everything read from disk (files written before they were known, or by an older version).
+  // What changed is written back once, clean.
+  sanitize?: <T>(value: T) => T
+}
+
+export function createConversationStore(args: CreateConversationStoreArgs): ConversationStore {
+  const sanitize = args.sanitize ?? (<T>(value: T) => value)
   const dir = join(args.dataDir, "conversations")
   const indexPath = join(dir, indexFileName)
   let index: Map<string, IndexEntry> | undefined
@@ -112,11 +120,23 @@ export function createConversationStore(args: { dataDir: string }): Conversation
     try {
       const stored = StoredConversationSchema.parse(JSON.parse(raw))
       if (stored.conversationId !== conversationId) throw new Error("conversation id mismatch")
-      return stored
+      return scrub(stored)
     } catch {
       console.warn(`Ignoring corrupt conversation file ${conversationId}.json; starting a fresh conversation`)
       return undefined
     }
+  }
+
+  // A file that held a secret is rewritten without it, once (its index entry follows with the next save).
+  function scrub(stored: StoredConversation): StoredConversation {
+    const clean = sanitize(stored)
+    if (JSON.stringify(clean) === JSON.stringify(stored)) return stored
+    try {
+      writeAtomically(pathFor(clean.conversationId), JSON.stringify(clean))
+    } catch (error) {
+      console.warn(`Could not rewrite conversation ${clean.conversationId} without its secrets: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return clean
   }
 
   function persistIndex(): void {
@@ -133,7 +153,13 @@ export function createConversationStore(args: { dataDir: string }): Conversation
     if (raw === undefined) return undefined
     try {
       const parsed = IndexFileSchema.parse(JSON.parse(raw))
-      return new Map(parsed.entries.map((entry) => [entry.conversationId, entry]))
+      const clean = sanitize(parsed.entries)
+      const entries = new Map(clean.map((entry) => [entry.conversationId, entry]))
+      if (JSON.stringify(clean) !== JSON.stringify(parsed.entries)) {
+        index = entries
+        persistIndex()
+      }
+      return entries
     } catch {
       console.warn("Ignoring corrupt thread index; rebuilding it")
       return undefined

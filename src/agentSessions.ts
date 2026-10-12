@@ -17,6 +17,7 @@ import { handleChatDelete, handleThreadsList } from "./conversations/threads.ts"
 import { handleChatCancel, handleChatPrompt } from "./conversations/turn.ts"
 import { channelAgent } from "./channelKey.ts"
 import { createConversationStore } from "./conversationStore.ts"
+import { redactDeep } from "./conversations/redaction.ts"
 import { errorMessage } from "./errors.ts"
 import type { AgentId, BridgeEvent, ClientMessage } from "./protocol.ts"
 import type { WindowChannels } from "./windowChannels.ts"
@@ -50,7 +51,8 @@ export interface AgentSessions {
 // The conversation machinery behind the WebSocket: routes each client message to its handler. The modules in
 // src/conversations hold the logic; this only wires them to the window channels and the lifetime timers.
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
-  const store = createConversationStore({ dataDir: args.dataDir })
+  const secrets = () => args.providers.flatMap((provider) => provider.secretValues?.() ?? [])
+  const store = createConversationStore({ dataDir: args.dataDir, sanitize: (value) => redactDeep(value, secrets()) })
   const ctx: Context = {
     channels: args.channels,
     store,
