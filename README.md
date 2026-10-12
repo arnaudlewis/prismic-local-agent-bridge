@@ -8,14 +8,14 @@ PoC, private. Requires Node >= 22.18 (runs TypeScript natively).
 
 ```sh
 npm install
-npm start -- --project <path to your website>
+npm start -- --use-user-codex
 ```
 
 The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing code (`Pairing code: <code>`).
 
 | Option | Default | Description |
 |---|---|---|
-| `--project` | current directory | Directory the agent works in (must exist). |
+| `--project` | `<data dir>/workspace` | Optional. Point it to a website folder if you want the agent to also read/edit code and use its AGENTS.md/skills. Must exist. Without it the agent works in an empty private workspace directory (created with mode 0700, reused and never cleaned if it already exists). |
 | `--port` | `7878` | Listening port. |
 | `--origin` | `http://localhost:5173` | Allowed browser origin. Repeatable. |
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
@@ -33,12 +33,12 @@ Environment:
 ```sh
 cd ~/DevTools/workspace/prismic-local-agent-bridge
 npm install            # first time only
-npm start -- --project ~/DevTools/workspace/poc-agent-project
+npm start -- --use-user-codex
 ```
 
 1. Read `Pairing code: <code>` in the banner, enter it in the "Local agent" panel of wroom.
 2. "Continue with ChatGPT" opens your browser. If you close that window, click "Restart sign-in" in the panel (the authorization URL is also printed in the terminal).
-3. Pick a model and reasoning effort, then chat. `--project` is only the agent's working directory; document access goes through the Prismic MCP.
+3. Pick a model and reasoning effort, then chat. The agent works in an empty private workspace unless you pass `--project <website folder>`; document access goes through the Prismic MCP either way.
 
 After a daemon restart you must pair again (tokens live in memory), but the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
 
@@ -103,6 +103,7 @@ The first prompt of a conversation is preceded by a preamble that also holds an 
 
 - **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization.
 - **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write` and `agent` (auto review) with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
+- **The default workspace is empty, but it is not a boundary:** without `--project` the agent's working directory is `<data dir>/workspace`, which holds no project files. What the agent can read or write on disk is decided by the sandbox mode, not by the working directory: Codex's `read-only` mode can still read files outside the workspace.
 - **`--allow-full-access`** only gates the `agent-full-access` preset, the only mode that never asks for approval. It does not restrict the other modes.
 - **`--use-user-codex`:** the agent uses your Codex home, config, hooks and MCP servers, and all their tools become reachable from the browser (see "Codex home").
 - **Stored transcripts:** conversations are saved in plain text under `<data dir>/conversations/` (`0600`), so anyone who can read your files can read them. They are never logged, and `chat_reset` deletes them. A conversation is reachable by any paired window that knows its id; ids are random UUIDs.

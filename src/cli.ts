@@ -1,6 +1,6 @@
-import { mkdirSync, statSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 import { parseArgs } from "node:util"
 
 import { createAgentSessions } from "./agentSessions.ts"
@@ -10,6 +10,7 @@ import { isolatedCodexHomePath, resolveUserCodexHome } from "./codexConfig.ts"
 import { createPairing } from "./pairing.ts"
 import { agentModes, bridgeInfo } from "./protocol.ts"
 import type { AgentMode } from "./protocol.ts"
+import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
 
 const defaultPort = 7878
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
   const dataDir = join(configHome, "prismic-local-agent-bridge")
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
 
+  const project = resolveProjectDir({ explicit: options.project, dataDir })
   const userCodexHome = options.useUserCodex ? resolveUserCodexHome() : undefined
   const pairing = createPairing({ onCodeChanged: (code) => console.info(`Pairing code: ${code}`) })
   const channels = createWindowChannels()
@@ -38,7 +40,7 @@ async function main(): Promise<void> {
     dataDir,
     userCodexHome,
     allowFullAccess: options.allowFullAccess,
-    projectDir: options.projectDir,
+    projectDir: project.path,
     agentMode: options.agentMode,
     model: options.model,
     refreshMarginMs: options.refreshMarginMs,
@@ -46,7 +48,7 @@ async function main(): Promise<void> {
   const server = await startBridgeServer({
     port: options.port,
     allowedOrigins: options.origins,
-    projectDir: options.projectDir,
+    projectDir: project.path,
     agentMode: options.agentMode,
     model: options.model,
     pairing,
@@ -55,7 +57,11 @@ async function main(): Promise<void> {
   })
 
   console.info(`${bridgeInfo.name} ${bridgeInfo.version}`)
-  console.info(`Project: ${options.projectDir}`)
+  console.info(
+    project.isDefaultWorkspace
+      ? `Project: ${project.path} (empty workspace, no project files)`
+      : `Project: ${project.path}`,
+  )
   console.info(`Listening on http://127.0.0.1:${options.port}`)
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
   console.info(`Agent mode: ${options.agentMode}${options.model === undefined ? "" : `, model: ${options.model}`}`)
@@ -77,7 +83,7 @@ async function main(): Promise<void> {
 }
 
 interface CliOptions {
-  projectDir: string
+  project: string | undefined
   port: number
   origins: string[]
   model: string | undefined
@@ -101,9 +107,6 @@ function parseOptions(): CliOptions {
     strict: true,
   })
 
-  const projectDir = resolve(values.project ?? process.cwd())
-  if (!isDirectory(projectDir)) throw new Error(`--project must be an existing directory: ${projectDir}`)
-
   const port = values.port === undefined ? defaultPort : Number(values.port)
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`Invalid --port: ${values.port}`)
 
@@ -125,7 +128,7 @@ function parseOptions(): CliOptions {
   }
 
   return {
-    projectDir,
+    project: values.project,
     port,
     origins: values.origin ?? [defaultOrigin],
     model,
@@ -133,14 +136,6 @@ function parseOptions(): CliOptions {
     useUserCodex: values["use-user-codex"] ?? false,
     allowFullAccess,
     refreshMarginMs,
-  }
-}
-
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
   }
 }
 
