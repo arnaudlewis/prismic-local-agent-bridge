@@ -54,12 +54,12 @@ export const EditorContextSummarySchema = z.object({
   document: z
     .object({
       id: z.string(),
+      uid: z.string().optional(),
       title: z.string(),
       customTypeLabel: z.string().optional(),
       versionStatus: z.string().optional(),
       locale: z.string().optional(),
       readOnly: z.boolean().optional(),
-      hasUnsavedChanges: z.boolean().optional(),
     })
     .optional(),
   slice: z.object({ name: z.string(), variation: z.string().optional() }).optional(),

@@ -92,7 +92,7 @@ The transcript contains your prompts and the agent's replies and tool titles in 
 
 When the agent's MCP tool call `get_editor_context` of the `prismic` server completes, the bridge sends `{ "type": "editor_context", "toolCallId", "context" }` so the browser can render a card from real data instead of parsing the agent's text. `context` is `{ status, ambiguous, document?, slice?, field?, detected?, pinned? }`:
 
-- `document` is the document the agent works on: the pinned window's document for `pinned_matches` and `context_changed`, otherwise the detected one. `slice` and `field` come from that same document. `context_changed` also carries `detected` (what the window shows now) and `pinned.id`; `pinned_document_not_open` carries `pinned.id` only.
+- `document` is `{ id, uid?, title, customTypeLabel?, versionStatus?, locale?, readOnly? }`: the document the agent works on: the pinned window's document for `pinned_matches` and `context_changed`, otherwise the detected one. `slice` and `field` come from that same document. `context_changed` also carries `detected` (what the window shows now) and `pinned.id`; `pinned_document_not_open` carries `pinned.id` only.
 - The tool result is parsed with a strict schema: unknown keys are dropped (the draft `content`, field `paths` and slice `item` never leave the bridge), strings are capped at 300 characters, and anything invalid is ignored silently.
 - It is emitted only when it differs from the last one of the conversation, recorded in the transcript, replayed in `chat_history` and persisted like the other events.
 

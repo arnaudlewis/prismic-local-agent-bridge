@@ -55,7 +55,7 @@ const WindowDocumentSchema = z.object({
   versionStatus: text,
   locale: text,
   readOnly: flag,
-  hasUnsavedChanges: flag,
+  uid: text,
   focusedSlice: z.object({ name: text, variation: text }).optional().catch(undefined),
   focusedField: z.object({ label: text, type: text }).optional().catch(undefined),
 })
@@ -110,12 +110,12 @@ function withWindowDocument(summary: EditorContextSummary, document: WindowDocum
     ...summary,
     document: {
       id: document.id,
+      ...(document.uid === undefined ? {} : { uid: document.uid }),
       title: document.title ?? "",
       ...(document.customTypeLabel === undefined ? {} : { customTypeLabel: document.customTypeLabel }),
       ...(document.versionStatus === undefined ? {} : { versionStatus: document.versionStatus }),
       ...(document.locale === undefined ? {} : { locale: document.locale }),
       ...(document.readOnly === undefined ? {} : { readOnly: document.readOnly }),
-      ...(document.hasUnsavedChanges === undefined ? {} : { hasUnsavedChanges: document.hasUnsavedChanges }),
     },
   }
   const slice = document.focusedSlice

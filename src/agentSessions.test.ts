@@ -638,6 +638,7 @@ const windowDocument = {
   locale: "en-us",
   section: "Main",
   readOnly: false,
+  uid: "home",
   hasUnsavedChanges: true,
   focusedSlice: {
     path: "slices[hero$1]",
@@ -683,12 +684,12 @@ describe("structured editor context", () => {
         ambiguous: false,
         document: {
           id: "DOC1",
+          uid: "home",
           title: "Home",
           customTypeLabel: "Page",
           versionStatus: "unclassified",
           locale: "en-us",
           readOnly: false,
-          hasUnsavedChanges: true,
         },
         slice: { name: "Hero", variation: "default" },
         field: { label: "Title", type: "StructuredText" },
@@ -698,6 +699,102 @@ describe("structured editor context", () => {
     for (const leaked of ["document-content-secret", "slice-item-secret", "a.b", "primary.title", "customTypeId", "Other"]) {
       expect(wire).not.toContain(leaked)
     }
+  })
+
+  it("never forwards hasUnsavedChanges", async () => {
+    const harness = createHarness()
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    await prompt(
+      harness,
+      toolText("prismic.get_editor_context", { status: "no_pin", detected: contextWindow(), ambiguous: false }),
+    )
+
+    expect(JSON.stringify(editorContextEvents(harness.events))).not.toContain("hasUnsavedChanges")
+  })
+
+  it("passes the document uid through, tolerates its absence and caps it", async () => {
+    const harness = createHarness()
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    const withoutUid = { ...windowDocument, uid: undefined }
+    await prompt(
+      harness,
+      toolText("prismic.get_editor_context", { status: "no_pin", detected: contextWindow(withoutUid), ambiguous: false }),
+    )
+    await prompt(
+      harness,
+      toolText("prismic.get_editor_context", {
+        status: "no_pin",
+        detected: contextWindow({ ...windowDocument, uid: "u".repeat(1000) }),
+        ambiguous: false,
+      }),
+    )
+    await prompt(
+      harness,
+      toolText("prismic.get_editor_context", {
+        status: "no_pin",
+        detected: contextWindow({ ...windowDocument, uid: 42 }),
+        ambiguous: false,
+      }),
+    )
+
+    const documents = editorContextEvents(harness.events).map((event) => event.context.document)
+    expect(documents[0]).not.toHaveProperty("uid")
+    expect(documents[1]?.uid).toBe("u".repeat(300))
+    expect(documents[2]).toMatchObject({ id: "DOC1" })
+    expect(documents[2]).not.toHaveProperty("uid")
+  })
+
+  it("loads a conversation stored with hasUnsavedChanges, strips it and does not re-emit an unchanged summary", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bridge-old-"))
+    mkdirSync(join(dataDir, "conversations"), { recursive: true })
+    writeFileSync(
+      join(dataDir, "conversations", `${conversationId}.json`),
+      JSON.stringify({
+        version: 1,
+        conversationId,
+        repository: "repo",
+        updatedAt: 1,
+        events: [
+          {
+            type: "editor_context",
+            toolCallId: "t1",
+            context: {
+              status: "no_pin",
+              ambiguous: false,
+              document: {
+                id: "DOC1",
+                title: "Home",
+                customTypeLabel: "Page",
+                versionStatus: "unclassified",
+                locale: "en-us",
+                readOnly: false,
+                hasUnsavedChanges: true,
+              },
+              slice: { name: "Hero", variation: "default" },
+              field: { label: "Title", type: "StructuredText" },
+            },
+          },
+        ],
+      }),
+    )
+    const harness = createHarness({ dataDir })
+
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+
+    const replayed = chatHistory(harness.eventsFor(windowA)).filter((event) => event.type === "editor_context")
+    expect(replayed).toHaveLength(1)
+    expect(JSON.stringify(replayed)).not.toContain("hasUnsavedChanges")
+
+    // Same summary as the stored one, minus the removed field and without a uid: it must not be emitted again.
+    await prompt(
+      harness,
+      toolText("prismic.get_editor_context", {
+        status: "no_pin",
+        detected: contextWindow({ ...windowDocument, uid: undefined }),
+        ambiguous: false,
+      }),
+    )
+    expect(editorContextEvents(harness.events)).toEqual([])
   })
 
   it("dedupes an unchanged summary and emits again when it changes", async () => {
