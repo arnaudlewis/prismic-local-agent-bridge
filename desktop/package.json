@@ -1,0 +1,22 @@
+{
+  "name": "prismic-agent-desktop",
+  "productName": "Prismic Agent",
+  "version": "0.1.0",
+  "description": "Menu bar app that keeps the Prismic local agent bridge running",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "prepare-resources": "node scripts/prepareResources.ts",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && npm run prepare-resources && electron-builder --mac --arm64 --publish never",
+    "release": "npm run build && npm run prepare-resources && electron-builder --mac --arm64 --publish always"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3",
+    "typescript": "6.0.3"
+  }
+}

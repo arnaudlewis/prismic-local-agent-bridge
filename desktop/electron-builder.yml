@@ -1,0 +1,33 @@
+appId: io.prismic.agent
+productName: Prismic Agent
+afterPack: scripts/afterPack.cjs
+directories:
+  output: release
+  buildResources: build-resources
+files:
+  - dist/**
+  - assets/**
+  - package.json
+extraResources:
+  - from: build/bridge
+    to: bridge
+  - from: build/runtime
+    to: runtime
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+  category: public.app-category.productivity
+  identity: "-" # ad-hoc: no Developer ID yet
+  extendInfo:
+    LSUIElement: true # menu bar only, no Dock icon
+dmg:
+  artifactName: Prismic-Agent-mac-arm64.dmg # no version: /releases/latest/download/<name> stays stable
+protocols:
+  - name: Prismic Agent
+    schemes: [prismic-agent]
+publish:
+  provider: github
+  owner: arnaudlewis
+  repo: prismic-local-agent-bridge
+  releaseType: release
