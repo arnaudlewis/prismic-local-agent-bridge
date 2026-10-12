@@ -177,7 +177,7 @@ describe("blocked commands", () => {
     expect(lists.length).toBeGreaterThan(0)
     for (const list of lists) {
       const names = list.commands.map((command) => command.name)
-      expect(names).toEqual(["status", "mcp", "plan", "compact", "rename", "$skill"])
+      expect(names).toEqual(["status", "mcp", "compact", "rename", "$skill"])
     }
   })
 
@@ -212,4 +212,53 @@ describe("blocked commands", () => {
       expect(harness.events.some((event) => event.type === "turn_end")).toBe(true)
     },
   )
+})
+
+describe("collaboration mode", () => {
+  function lastOption(harness: Harness, id: string): BridgeConfigOption | undefined {
+    const configs = harness.events.filter((event) => event.type === "session_config")
+    return configs.at(-1)?.options.find((option) => option.id === id)
+  }
+
+  it("relays the collaboration_mode option unchanged", async () => {
+    const harness = createHarness({ allowFullAccess: false })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+
+    const option = lastOption(harness, "collaboration_mode")
+    expect(option?.category).toBe("collaboration_mode")
+    expect(option?.currentValue).toBe("default")
+    expect(option?.values.map((entry) => entry.value)).toEqual(["default", "plan"])
+  })
+
+  it("accepts set_config_option, keeps it across an agent restart and clears it on chat_reset", async () => {
+    const harness = createHarness({ allowFullAccess: false })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    await harness.agents.handleMessage(windowId, {
+      type: "set_config_option",
+      configId: "collaboration_mode",
+      value: "plan",
+    })
+    expect(notices(harness.events)).toEqual([])
+    expect(lastOption(harness, "collaboration_mode")?.currentValue).toBe("plan")
+
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session: { ...session, prismicToken: "other" } })
+    expect(lastOption(harness, "collaboration_mode")?.currentValue).toBe("plan")
+
+    await harness.agents.handleMessage(windowId, { type: "chat_reset" })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    expect(lastOption(harness, "collaboration_mode")?.currentValue).toBe("default")
+  })
+
+  it("hides /plan from the list but still forwards a typed /plan", async () => {
+    const harness = createHarness({ allowFullAccess: false })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    harness.events.length = 0
+
+    await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "/plan", session })
+
+    expect(notices(harness.events)).toEqual([])
+    expect(
+      harness.events.some((event) => event.type === "agent_message_chunk" && event.text === "prompt:/plan"),
+    ).toBe(true)
+  })
 })

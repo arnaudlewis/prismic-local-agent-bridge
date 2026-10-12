@@ -4,6 +4,7 @@ import { createInterface } from "node:readline"
 const modeValues = ["read-only", "workspace-write", "agent", "agent-full-access"]
 
 let mode = process.env.INITIAL_AGENT_MODE ?? "read-only"
+let collaborationMode = "default"
 
 function configOptions() {
   return [
@@ -14,6 +15,17 @@ function configOptions() {
       type: "select",
       currentValue: mode,
       options: modeValues.map((value) => ({ value, name: value })),
+    },
+    {
+      id: "collaboration_mode",
+      name: "Collaboration mode",
+      category: "collaboration_mode",
+      type: "select",
+      currentValue: collaborationMode,
+      options: [
+        { value: "default", name: "Default" },
+        { value: "plan", name: "Plan" },
+      ],
     },
   ]
 }
@@ -43,6 +55,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       break
     case "session/set_config_option":
       if (message.params?.configId === "mode" && message.params.value !== undefined) mode = message.params.value
+      if (message.params?.configId === "collaboration_mode" && message.params.value !== undefined) {
+        collaborationMode = message.params.value
+      }
       respond(message.id, { configOptions: configOptions() })
       break
     case "session/prompt": {

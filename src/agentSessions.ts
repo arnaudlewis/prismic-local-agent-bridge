@@ -495,6 +495,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       agent.availableCommands = update.availableCommands
         .map(toBridgeCommand)
         .filter((command) => !blockedCommands.includes(command.name.toLowerCase()))
+        .filter((command) => !hiddenCommands.includes(command.name.toLowerCase()))
       if (!agent.replaying) sendAvailableCommands(windowId, agent)
       return
     }
@@ -635,6 +636,10 @@ export function isSlashCommand(text: string): boolean {
 
 // Account-global commands, or ones that start turns outside the bridge's sandbox and approval policy.
 const blockedCommands = ["logout", "review", "review-branch", "review-commit", "goal"]
+
+// Not offered in the command list because the browser has a dedicated control, but still forwarded when typed.
+// /plan is the collaboration_mode toggle.
+const hiddenCommands = ["plan"]
 
 function blockedCommandName(text: string): string | undefined {
   const name = /^\/([A-Za-z][\w-]*)(\s|$)/.exec(text.trim())?.[1]?.toLowerCase()
