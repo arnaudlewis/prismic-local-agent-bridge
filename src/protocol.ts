@@ -13,7 +13,16 @@ export const conversationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89a
 
 const SessionSchema = z.object({
   conversationId: z.string().regex(conversationIdPattern),
-  mcpServerUrl: z.url({ protocol: /^https?$/ }).max(2048),
+  // Only http(s), and no credentials in the URL: they would end up in logs and in the MCP configuration of the agent.
+  mcpServerUrl: z
+    .url({ protocol: /^https?$/ })
+    .max(2048)
+    // The refinement also runs on values that failed the URL check above, so it must never throw on them.
+    .refine((value) => {
+      if (!URL.canParse(value)) return false
+      const url = new URL(value)
+      return url.username === "" && url.password === ""
+    }, "The MCP server URL must not contain credentials"),
   prismicToken: z.string().min(1).max(8192),
   repository: z.string().min(1).max(200),
   document: z.object({ id: z.string().min(1).max(300), title: z.string().max(300) }).optional(),

@@ -82,16 +82,18 @@ async function callTool(args: ReadEditorContextArgs, controller: AbortController
 }
 
 interface RpcResponse {
+  id?: unknown
   result?: unknown
   error?: unknown
 }
 
-// Reads at most 512 KiB. An event stream is parsed as it arrives and the read stops at the first JSON-RPC response,
-// because a server may keep the stream open after answering.
-async function readRpcResponse(response: Response, isEventStream: boolean): Promise<RpcResponse | undefined> {
+// Reads at most 512 KiB. An event stream is parsed as it arrives and the read stops at the first JSON-RPC response
+// to our request, because a server may keep the stream open after answering. Exported for tests.
+export async function readRpcResponse(response: Response, isEventStream: boolean): Promise<RpcResponse | undefined> {
   const reader = response.body?.getReader()
   if (reader === undefined) return undefined
   const decoder = new TextDecoder()
+  const stream = isEventStream ? createEventStreamParser() : undefined
   let text = ""
   let bytes = 0
   try {
@@ -100,32 +102,62 @@ async function readRpcResponse(response: Response, isEventStream: boolean): Prom
       if (done) break
       bytes += value.byteLength
       if (bytes > maxResponseBytes) throw new ReadFailure("response too large")
-      text += decoder.decode(value, { stream: true })
-      if (isEventStream) {
-        const found = findEventStreamResponse(text)
-        if (found !== undefined) return found
+      const decoded = decoder.decode(value, { stream: true })
+      if (stream === undefined) {
+        text += decoded
+        continue
       }
+      const found = stream.push(decoded)
+      if (found !== undefined) return found
     }
   } finally {
     await reader.cancel().catch(() => {})
   }
-  text += decoder.decode()
-  return isEventStream ? findEventStreamResponse(text) : parseRpc(text)
+  const rest = decoder.decode()
+  if (stream === undefined) return parseRpc(text + rest)
+  return stream.push(rest) ?? stream.finish()
 }
 
-function findEventStreamResponse(text: string): RpcResponse | undefined {
-  for (const event of text.split(/\r?\n\r?\n/)) {
+// Each complete event (blank-line delimited) is looked at exactly once: only the unconsumed tail is kept, and only
+// the newly received text is scanned for a delimiter, so the work is linear in the size of the stream.
+function createEventStreamParser() {
+  const delimiter = /\r?\n\r?\n/g
+  let pending = ""
+
+  function parseEvent(event: string): RpcResponse | undefined {
     const data = event
       .split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).replace(/^ /, ""))
       .join("\n")
-    const parsed = parseRpc(data)
-    if (parsed !== undefined) return parsed
+    return data === "" ? undefined : parseRpc(data)
   }
-  return undefined
+
+  return {
+    push(chunk: string): RpcResponse | undefined {
+      // A delimiter can straddle two chunks: start 3 characters before the new text (len("\r\n\r") ).
+      delimiter.lastIndex = Math.max(0, pending.length - 3)
+      pending += chunk
+      let consumed = 0
+      for (let match = delimiter.exec(pending); match !== null; match = delimiter.exec(pending)) {
+        const found = parseEvent(pending.slice(consumed, match.index))
+        consumed = match.index + match[0].length
+        if (found !== undefined) return found
+        delimiter.lastIndex = consumed
+      }
+      pending = pending.slice(consumed)
+      return undefined
+    },
+    // The stream may end without the blank line after its last event.
+    finish(): RpcResponse | undefined {
+      const found = pending === "" ? undefined : parseEvent(pending)
+      pending = ""
+      return found
+    },
+  }
 }
 
+// Only the response to our request (id 1) counts: notifications and other messages in the stream are skipped.
 function parseRpc(text: string): RpcResponse | undefined {
   let json: unknown
   try {
@@ -135,5 +167,5 @@ function parseRpc(text: string): RpcResponse | undefined {
   }
   if (typeof json !== "object" || json === null || Array.isArray(json)) return undefined
   const message = json as RpcResponse
-  return message.result !== undefined || message.error !== undefined ? message : undefined
+  return message.id === 1 && (message.result !== undefined || message.error !== undefined) ? message : undefined
 }

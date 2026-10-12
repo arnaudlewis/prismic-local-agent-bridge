@@ -173,14 +173,34 @@ export function buildEditorContextBlock(result: unknown, pinnedDocumentId: strin
   return fitBlock(payload)
 }
 
-// Over the cap, the field paths (by far the largest part) are halved until the block fits.
+// A hard ceiling: over the cap, the field paths (by far the largest part) are halved first; if the rest alone is
+// still too big (JSON escaping can multiply the size of odd characters), every string is cut shorter and shorter.
 function fitBlock(payload: { focusedSlice?: { paths?: string[] } }): string {
+  let current: unknown = payload
+  const serialize = () => `${blockHeader}\n${JSON.stringify(current)}`
+
   for (;;) {
-    const block = `${blockHeader}\n${JSON.stringify(payload)}`
-    const paths = payload.focusedSlice?.paths
-    if (Buffer.byteLength(block) <= maxBlockBytes || paths === undefined || paths.length === 0) return block
-    payload.focusedSlice = { ...payload.focusedSlice, paths: paths.slice(0, Math.floor(paths.length / 2)) }
+    const paths = (current as typeof payload).focusedSlice?.paths
+    if (Buffer.byteLength(serialize()) <= maxBlockBytes || paths === undefined || paths.length === 0) break
+    const focusedSlice = { ...(current as typeof payload).focusedSlice, paths: paths.slice(0, Math.floor(paths.length / 2)) }
+    current = { ...(current as object), focusedSlice }
   }
+
+  let limit = maxStringLength
+  while (Buffer.byteLength(serialize()) > maxBlockBytes && limit > 0) {
+    limit = Math.floor(limit / 2)
+    current = truncateStrings(current, limit)
+  }
+  return serialize()
+}
+
+function truncateStrings(value: unknown, limit: number): unknown {
+  if (typeof value === "string") return value.slice(0, limit)
+  if (Array.isArray(value)) return value.map((item) => truncateStrings(item, limit))
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, truncateStrings(entry, limit)]))
+  }
+  return value
 }
 
 function withWindowDocument(summary: EditorContextSummary, document: WindowDocument | undefined): EditorContextSummary {
