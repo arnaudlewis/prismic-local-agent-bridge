@@ -166,3 +166,56 @@ describe("an agent that is still starting", () => {
     expect(harness.prismic.runtime.grants.tokens()).toEqual([])
   })
 })
+
+describe("a start queued behind another one", () => {
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+  const stallMs = 1200
+
+  // The first start is held in its handshake; a chat_open and a chat_prompt for the same conversation queue behind it.
+  async function queueBehindStall() {
+    process.env.FAKE_AGENT_NEW_SESSION_DELAY_MS = String(stallMs)
+    const harness = createHarness()
+    const first = harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    await vi.waitFor(() => expect(givenToAgents()).toHaveLength(1))
+    const queued = [
+      harness.agents.handleMessage(windowA, { type: "chat_open", session }),
+      harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "queued prompt", session }),
+    ]
+    return { harness, pending: [first, ...queued] }
+  }
+
+  // `detached`: the window was detached by the delete, so nothing at all reaches it. After stopAll the window is still
+  // attached to the stopped conversation, which may be told it is idle: nothing else may reach it.
+  async function expectNothingStartedAfterRelease(
+    harness: ReturnType<typeof createHarness>,
+    pending: Promise<void>[],
+    detached: boolean,
+  ) {
+    harness.events.length = 0
+    await Promise.all(pending)
+    // Long enough for a second child to be spawned and to log its MCP config, were it spawned.
+    await pause(stallMs + 600)
+
+    expect(givenToAgents()).toHaveLength(1)
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
+    expect(liveAgentText(harness.events)).toBe("")
+    expect(harness.events.filter((event) => event.type !== "chat_status" || event.status !== "idle")).toEqual([])
+    if (detached) expect(harness.events).toEqual([])
+  }
+
+  it("does not spawn an agent or issue a grant for a conversation deleted while it waited", async () => {
+    const { harness, pending } = await queueBehindStall()
+
+    await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId })
+
+    await expectNothingStartedAfterRelease(harness, pending, true)
+  })
+
+  it("does not spawn an agent or issue a grant after the daemon stopped everything while it waited", async () => {
+    const { harness, pending } = await queueBehindStall()
+
+    harness.agents.stopAll()
+
+    await expectNothingStartedAfterRelease(harness, pending, false)
+  })
+})

@@ -14,6 +14,10 @@ export interface McpUpstreamRequest {
   // Buffered, so that it can be sent again after a refresh.
   body?: Buffer
   signal: AbortSignal
+  // Called right before every outbound attempt (the first and the retry after a refresh), after the token was
+  // obtained: throws to stop a request whose caller is no longer allowed to make it (its grant was revoked, or the
+  // account the token belongs to is not the one it was started for). Its error reaches the caller as is.
+  guard?: () => void
 }
 
 export interface McpUpstream {
@@ -46,11 +50,13 @@ export function createMcpUpstream(args: { auth: PrismicAuth }): McpUpstream {
   return {
     async send(request) {
       const accessToken = await auth.accessToken(request.mcpOrigin)
+      request.guard?.()
       const first = await attempt(request, accessToken)
       if (first.status !== 401) return first
       await first.body?.cancel().catch(() => {})
 
       const refreshed = await auth.refreshAfterUnauthorized(request.mcpOrigin, accessToken)
+      request.guard?.()
       const second = await attempt(request, refreshed)
       if (second.status !== 401) return second
       await second.body?.cancel().catch(() => {})

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 
 import { startBridgeServer } from "../bridgeServer.ts"
+import { HttpError } from "../httpUtils.ts"
 import type { BridgeServer } from "../bridgeServer.ts"
 import { channelKey } from "../channelKey.ts"
 import type { BridgeEvent } from "../protocol.ts"
@@ -134,6 +135,27 @@ function send(
     if (body !== null) request.write(body)
     request.end()
   })
+}
+
+// A request whose headers are sent now and whose body is sent only when the test says so: the agent is slow to write it.
+function sendWithHeldBody(proxy: Proxy): { reply: Promise<Reply>; sendBody(): void } {
+  const headers = { Authorization: `Bearer ${proxy.grant}`, "Content-Type": "application/json" }
+  const body = JSON.stringify(toolCall)
+  let sendBody: () => void = () => {}
+  const reply = new Promise<Reply>((resolve) => {
+    const request = httpRequest({ host: "127.0.0.1", port: proxy.port, path: "/agent-mcp", method: "POST", headers }, (response) => {
+      const chunks: Buffer[] = []
+      response.on("data", (chunk: Buffer) => chunks.push(chunk))
+      response.on("error", () => {})
+      response.on("close", () =>
+        resolve({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks).toString("utf8"), complete: response.complete }),
+      )
+    })
+    request.on("error", () => resolve({ status: 0, headers: {}, body: "", complete: false }))
+    request.flushHeaders()
+    sendBody = () => request.end(body)
+  })
+  return { reply, sendBody: () => sendBody() }
 }
 
 function errorOf(reply: Reply): string {
@@ -313,6 +335,69 @@ describe("against an OAuth server", () => {
     ])
   })
 
+  function refreshGrants(): number {
+    return oauthStub.requestsTo("/token").filter((request) => new URLSearchParams(request.body).get("grant_type") === "refresh_token").length
+  }
+
+  // The proxy looks at the account as soon as the headers arrive: from then on the request is "in flight".
+  async function holdBodyUntilAuthorized(): Promise<{ reply: Promise<Reply>; sendBody(): void }> {
+    const looked = vi.spyOn(auth, "status")
+    const held = sendWithHeldBody(proxy)
+    await vi.waitFor(() => expect(looked).toHaveBeenCalled())
+    return held
+  }
+
+  it("refuses a request whose account changed while the agent was still writing the body", async () => {
+    const held = await holdBodyUntilAuthorized()
+    await auth.signOut(oauthStub.origin)
+    oauthStub.userId = "user-2"
+    await signIn(auth, oauthStub)
+
+    held.sendBody()
+    const reply = await held.reply
+
+    expect(reply.status).toBe(502)
+    expect(errorOf(reply)).toBe("prismic_account_changed")
+    expect(oauthStub.requestsTo("/mcp")).toHaveLength(0)
+  })
+
+  it("refuses a request whose grant was revoked while the agent was still writing the body", async () => {
+    const held = await holdBodyUntilAuthorized()
+    proxy.grants.revoke(proxy.grant)
+
+    held.sendBody()
+    const reply = await held.reply
+
+    expect(reply.status).toBe(401)
+    expect(errorOf(reply)).toBe("unauthorized")
+    expect(oauthStub.requestsTo("/mcp")).toHaveLength(0)
+  })
+
+  it("does not send the retry after a refresh when the account changed during the refresh", async () => {
+    // The daemon's account switches while the refresh is on the wire: the token that comes back can't be used for this agent.
+    let currentUser: string | undefined
+    const switching: PrismicAuth = {
+      ...auth,
+      status: (origin) => (currentUser === undefined ? auth.status(origin) : { status: "signed_in", userId: currentUser }),
+    }
+    const switchingProxy = await startProxy({ auth: switching, mcpOrigin: oauthStub.origin })
+    oauthStub.expireAccessTokens()
+    oauthStub.tokenDelayMs = 200
+
+    const reply = send(switchingProxy)
+    await vi.waitFor(() => expect(oauthStub.requestsTo("/mcp")).toHaveLength(1))
+    currentUser = "user-2"
+
+    const answer = await reply
+    expect(answer.status).toBe(502)
+    expect(errorOf(answer)).toBe("prismic_account_changed")
+    expect(refreshGrants()).toBe(1)
+    expect(oauthStub.requestsTo("/mcp")).toHaveLength(1)
+    expect(switchingProxy.notices.map((notice) => notice.event)).toEqual([
+      { type: "notice", tone: "error", text: "The Prismic account changed. Send a message to restart the agent." },
+    ])
+  })
+
   it("answers 502 upstream_unavailable, without a notice, while the server is down", async () => {
     const origin = oauthStub.origin
     await oauthStub.close()
@@ -386,5 +471,66 @@ describe("against a misbehaving MCP server", () => {
     expect(reply.status).toBe(502)
     expect(errorOf(reply)).toBe("upstream_unavailable")
     expect(proxy.notices).toEqual([])
+  })
+})
+
+describe("McpUpstream.send guard", () => {
+  let stub: OAuthStub
+  let auth: PrismicAuth
+
+  function sendWithGuard(guard: () => void): Promise<Response> {
+    return createMcpUpstream({ auth }).send({
+      mcpOrigin: stub.origin,
+      path: "/mcp",
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: Buffer.from(JSON.stringify(toolCall)),
+      signal: new AbortController().signal,
+      guard,
+    })
+  }
+
+  beforeEach(async () => {
+    stub = await startOAuthStub()
+    closers.push(() => stub.close())
+    auth = await signedInAuth(stub)
+  })
+
+  it("is asked before every outbound attempt: once for a request, twice when a refresh makes it be sent again", async () => {
+    const guard = vi.fn()
+    expect((await sendWithGuard(guard)).status).toBe(200)
+    expect(guard).toHaveBeenCalledTimes(1)
+
+    stub.expireAccessTokens()
+    guard.mockClear()
+    expect((await sendWithGuard(guard)).status).toBe(200)
+    expect(stub.requestsTo("/mcp")).toHaveLength(3)
+    expect(guard).toHaveBeenCalledTimes(2)
+  })
+
+  it("stops the request with the guard's own error, before anything is sent", async () => {
+    const refusal = new HttpError(502, "prismic_account_changed")
+
+    await expect(
+      sendWithGuard(() => {
+        throw refusal
+      }),
+    ).rejects.toBe(refusal)
+    expect(stub.requestsTo("/mcp")).toHaveLength(0)
+  })
+
+  it("stops the retry with the guard's own error, not as an unavailable server", async () => {
+    const refusal = new HttpError(502, "prismic_account_changed")
+    let calls = 0
+    stub.expireAccessTokens()
+
+    await expect(
+      sendWithGuard(() => {
+        calls += 1
+        if (calls === 2) throw refusal
+      }),
+    ).rejects.toBe(refusal)
+    expect(stub.requestsTo("/mcp")).toHaveLength(1)
+    expect(auth.status(stub.origin)).toMatchObject({ status: "signed_in" })
   })
 })

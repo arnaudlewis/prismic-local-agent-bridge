@@ -96,21 +96,30 @@ export function agentMcpRoutes(args: AgentMcpRoutesArgs): ProviderRoute[] {
     return headers
   }
 
-  async function forward(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // An agent is a local process: a request that carries an Origin came from a web page.
-    if (req.headers.origin !== undefined) throw new HttpError(403, "forbidden_origin")
-    // No WWW-Authenticate: an agent must never start an OAuth flow of its own.
-    const token = getBearerToken(req)
+  // The grant must be live, and the daemon signed in as the user the agent started as. Checked when the request
+  // arrives and again before every outbound attempt: the body can take as long as the agent wants, and a token
+  // refresh takes a while too, so the account or the grant may have changed meanwhile.
+  function authorize(token: string | undefined): AgentMcpGrant {
     const grant = token === undefined ? undefined : grants.resolve(token)
     if (grant === undefined) throw new HttpError(401, "unauthorized")
-    // The grant was issued for the account the agent started as: it never acts as another one.
     const account = prismicAuth.status(grant.mcpOrigin)
     if (account.status === "signed_in" && account.userId !== grant.userId) {
       notify(grant.windowKey, accountChangedNotice)
       throw new HttpError(502, "prismic_account_changed")
     }
+    return grant
+  }
+
+  async function forward(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // An agent is a local process: a request that carries an Origin came from a web page.
+    if (req.headers.origin !== undefined) throw new HttpError(403, "forbidden_origin")
+    // No WWW-Authenticate: an agent must never start an OAuth flow of its own.
+    const token = getBearerToken(req)
+    authorize(token)
 
     const body = await readRawBody(req, maxRequestBytes)
+    // Whatever happened while the body was arriving.
+    const grant = authorize(token)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     res.on("close", () => controller.abort())
@@ -124,8 +133,10 @@ export function agentMcpRoutes(args: AgentMcpRoutesArgs): ProviderRoute[] {
           headers: upstreamHeaders(req),
           body,
           signal: controller.signal,
+          guard: () => void authorize(token),
         })
       } catch (error) {
+        if (error instanceof HttpError) throw error
         if (error instanceof PrismicSignInRequiredError) {
           notify(grant.windowKey, signInNotice)
           throw new HttpError(502, "prismic_sign_in_required")

@@ -56,8 +56,15 @@ async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId:
 
 class StaleCredentialsError extends Error {}
 
+function isLive(ctx: Context, conversation: Conversation): boolean {
+  return !conversation.deleted && ctx.conversations.get(conversation.id) === conversation
+}
+
 async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId: string): Promise<EnsureOutcome> {
   // Everything below awaits something; a delete in the meantime must not leave notices or an agent behind.
+  // A start that waited in the queue behind another one starts from the generation after a delete: it must notice
+  // the delete (or stopAll) by itself, or it would spawn an agent, and issue a grant, for a conversation that is gone.
+  if (!isLive(ctx, conversation)) return abandon(ctx, conversation)
   const entryGeneration = conversation.generation
   // Without a pairing there is no MCP to reach, and without a Prismic sign-in the proxy has nothing to swap in.
   const mcpOrigin = ctx.channels.mcpOrigin(windowId)
