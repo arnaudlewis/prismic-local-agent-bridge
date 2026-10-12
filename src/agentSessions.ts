@@ -68,6 +68,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     conversations: new Map(),
     windowConversations: new Map(),
     windowScopes: new Map(),
+    redactors: new Map(),
     activity: { tick: 0 },
   }
 

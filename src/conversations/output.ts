@@ -1,6 +1,8 @@
 import { errorMessage } from "../errors.ts"
 import type { BridgeEvent, HistoryEvent, RecordedBridgeEvent } from "../protocol.ts"
+import { knownSecrets } from "./context.ts"
 import type { Context } from "./context.ts"
+import { createMessageRedactor, redactEvent, redactText } from "./redaction.ts"
 import type { Conversation } from "./types.ts"
 
 const saveDebounceMs = 500
@@ -18,9 +20,36 @@ export function touch(ctx: Context, conversation: Conversation): void {
   conversation.lastActiveAt = ctx.activity.tick
 }
 
-// Everything the UI renders goes through here so a window that attaches later can replay it.
+function redactorOf(ctx: Context, conversation: Conversation) {
+  let redactor = ctx.redactors.get(conversation.id)
+  if (redactor === undefined) {
+    redactor = createMessageRedactor()
+    ctx.redactors.set(conversation.id, redactor)
+  }
+  return redactor
+}
+
+// Everything the UI renders goes through here so a window that attaches later can replay it. It is also the one place
+// where secrets are taken out of what the daemon sends and stores: an agent can repeat its own API key (a prompt
+// injection can ask it to), and a key can arrive split across the chunks of one message.
 export function emit(ctx: Context, conversation: Conversation, event: RecordedBridgeEvent): void {
   touch(ctx, conversation)
+  const secrets = knownSecrets(ctx)
+  const redactor = redactorOf(ctx, conversation)
+  if (event.type === "agent_message_chunk") {
+    for (const piece of redactor.push(event.messageId, event.text, secrets)) deliver(ctx, conversation, chunkOf(piece))
+    return
+  }
+  // Whatever an unfinished message was holding back comes out before the next event.
+  for (const piece of redactor.flush(secrets)) deliver(ctx, conversation, chunkOf(piece))
+  deliver(ctx, conversation, redactEvent(event, secrets))
+}
+
+function chunkOf(piece: { messageId: string | undefined; text: string }): RecordedBridgeEvent {
+  return { type: "agent_message_chunk", text: piece.text, ...(piece.messageId === undefined ? {} : { messageId: piece.messageId }) }
+}
+
+function deliver(ctx: Context, conversation: Conversation, event: RecordedBridgeEvent): void {
   record(ctx, conversation, event)
   sendLive(ctx, conversation, event)
   if (event.type === "turn_end") {
@@ -32,8 +61,13 @@ export function emit(ctx: Context, conversation: Conversation, event: RecordedBr
 }
 
 export function record(ctx: Context, conversation: Conversation, event: HistoryEvent): void {
-  conversation.transcript.append(event)
+  conversation.transcript.append(redactEvent(event, knownSecrets(ctx)))
   scheduleSave(ctx, conversation)
+}
+
+// The user's own words, a title made from them, and anything else a person could paste a key into.
+export function redact(ctx: Context, text: string): string {
+  return redactText(text, knownSecrets(ctx))
 }
 
 export function notify(ctx: Context, conversation: Conversation, tone: "info" | "error", text: string): void {
@@ -75,10 +109,10 @@ export function flushSave(ctx: Context, conversation: Conversation): void {
       version: 1,
       conversationId: conversation.id,
       agent: conversation.agent,
-      repository: conversation.repository,
+      repository: redact(ctx, conversation.repository),
       acpSessionId: conversation.resumeSessionId,
       pinnedDocumentId: conversation.pinnedDocumentId,
-      title: conversation.title,
+      title: conversation.title === undefined ? undefined : redact(ctx, conversation.title),
       updatedAt: conversation.updatedAt,
       events,
     })

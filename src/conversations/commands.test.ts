@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { toBridgeCommand } from "./commands.ts"
 import type { BridgeEvent } from "../protocol.ts"
-import { windowId, session, createHarness, notices } from "../testing/harness.ts"
+import { windowId, session, createHarness, notices, promptedBlocks } from "../testing/harness.ts"
 
 describe("toBridgeCommand", () => {
   it("keeps the hint of unstructured input", () => {
@@ -30,9 +30,7 @@ describe("blocked commands", () => {
   const blocked = ["logout", "review", "review-branch", "review-commit", "goal"]
 
   function promptedTexts(events: BridgeEvent[]): string[] {
-    return events.flatMap((event) =>
-      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
-    )
+    return promptedBlocks(events)
   }
 
   it("never lists blocked commands but keeps the others", async () => {
@@ -83,9 +81,7 @@ describe("blocked commands", () => {
 
 describe("blocked command canonicalization", () => {
   function promptedTexts(events: BridgeEvent[]): string[] {
-    return events.flatMap((event) =>
-      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
-    )
+    return promptedBlocks(events)
   }
 
   async function send(text: string) {

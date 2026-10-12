@@ -37,6 +37,8 @@ export interface ApiKeyVault {
   // Where a key would be kept if one were set now.
   storage(): KeyStorage
   status(): Promise<{ configured: boolean; keyHint?: string; storage: KeyStorage; error?: string }>
+  // Every key this process has held (read, set or replaced): for redaction only, never sent anywhere.
+  knownKeys(): string[]
   // Changes whenever the key does and says nothing about it (HMAC with a random per-process salt).
   fingerprint(key: string): string
 }
@@ -61,6 +63,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
   let mutationEpoch = 0
   let credentialEpoch = 0
   let queue: Promise<unknown> = Promise.resolve()
+  const seenKeys = new Set<string>()
 
   // Mutations of the stored key are serialized: a write never interleaves with a removal.
   function exclusive<T>(run: () => Promise<T>): Promise<T> {
@@ -76,9 +79,14 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
 
   async function get(): Promise<StoredKey | undefined> {
     const fromEnv = envKey()
-    if (fromEnv !== undefined) return { key: fromEnv, storage: "env" }
+    if (fromEnv !== undefined) {
+      seenKeys.add(fromEnv)
+      return { key: fromEnv, storage: "env" }
+    }
     const stored = await store.get()
-    return stored === undefined ? undefined : { key: stored, storage: store.backend }
+    if (stored === undefined) return undefined
+    seenKeys.add(stored)
+    return { key: stored, storage: store.backend }
   }
 
   // Best effort, and never a word about the content: an error here must not stop a removal or a replacement.
@@ -96,6 +104,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
     // Before and after: whoever read the key while this runs must not trust what it read.
     credentialEpoch += 1
+    seenKeys.add(key)
     await store.set(key)
     await clearOtherStores()
     credentialEpoch += 1
@@ -124,6 +133,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
 
   return {
     get,
+    knownKeys: () => [...seenKeys],
     credentialEpoch: () => credentialEpoch,
     beginMutation: () => (mutationEpoch += 1),
     set: (key) => exclusive(() => storeKey(key)),

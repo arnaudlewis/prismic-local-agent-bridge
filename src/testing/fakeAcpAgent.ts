@@ -141,6 +141,23 @@ function handlePrompt(message: Message): void {
     respond(message.id, { stopReason: "end_turn" })
     return
   }
+  // The last 4 characters of a variable: enough to tell which key an agent was started with, while the daemon
+  // redacts the key itself from anything it forwards.
+  if (text.startsWith("env-tail ")) {
+    const name = text.slice("env-tail ".length).trim()
+    chunk(`envtail:${name}=${(process.env[name] ?? "").slice(-4)}`)
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
+  if (text.startsWith("say-chunks ")) {
+    // "say-chunks <messageId> <chunk>|<chunk>|...": one message sent in pieces, like a model streaming a reply.
+    const [, messageId = "", ...rest] = text.split(" ")
+    for (const piece of rest.join(" ").split("|")) {
+      notify({ sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: piece } })
+    }
+    respond(message.id, { stopReason: "end_turn" })
+    return
+  }
   if (text.startsWith("echo-env ")) {
     const name = text.slice("echo-env ".length).trim()
     chunk(`env:${name}=${process.env[name] ?? ""}`)
@@ -202,6 +219,23 @@ function handlePrompt(message: Message): void {
   if (text.includes("hold")) {
     chunk("working")
     heldPromptId = message.id
+    return
+  }
+  if (text.includes("ask-permission-with-key")) {
+    permissionPromptId = message.id
+    write({
+      jsonrpc: "2.0",
+      id: "perm-1",
+      method: "session/request_permission",
+      params: {
+        sessionId: "fake-session",
+        toolCall: { toolCallId: "tool-1", title: `Run with ${process.env.ANTHROPIC_API_KEY ?? ""}` },
+        options: [
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ],
+      },
+    })
     return
   }
   if (text.includes("ask-permission")) {

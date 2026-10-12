@@ -142,6 +142,12 @@ export function liveAgentText(events: BridgeEvent[]): string {
   return events.flatMap((event) => (event.type === "agent_message_chunk" ? [event.text] : [])).join("")
 }
 
+// The text blocks the fake agent says it was prompted with. A chunk ending in "s" is held back by the daemon until the
+// next one (it could be the start of a key), so the blocks are rebuilt from the whole text.
+export function promptedBlocks(events: BridgeEvent[]): string[] {
+  return liveAgentText(events).split("prompt:").slice(1)
+}
+
 export function lastStatus(events: BridgeEvent[]): string | undefined {
   const status = events.findLast((event) => event.type === "chat_status")
   return status?.type === "chat_status" ? status.status : undefined

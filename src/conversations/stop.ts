@@ -21,6 +21,8 @@ export function stopAgent(ctx: Context, conversation: Conversation): ChildProces
   // A child that is still handshaking isn't conversation.process yet, and must not outlive the stop.
   conversation.startingChild?.kill("SIGTERM")
   conversation.startingChild = undefined
+  // What an unfinished message was holding back belongs to the old agent.
+  ctx.redactors.delete(conversation.id)
   const agent = conversation.process
   conversation.process = undefined
   if (agent === undefined) return undefined

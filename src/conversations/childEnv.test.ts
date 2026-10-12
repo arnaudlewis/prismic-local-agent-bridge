@@ -249,9 +249,9 @@ describe("the complete environment of an agent child", () => {
       const harness = createHarness({ dataDir, providers: [{ ...provider, initialConfig: undefined }], passEnv: [] })
       const claudeSession = { ...session, agent: "claude" as const }
       await harness.agents.handleMessage(windowId, { type: "chat_open", session: claudeSession })
-      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "echo-env ANTHROPIC_API_KEY", session: claudeSession })
+      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "env-tail ANTHROPIC_API_KEY", session: claudeSession })
 
-      expect(liveAgentText(harness.events)).toContain(`env:ANTHROPIC_API_KEY=${claudeKey}`)
+      expect(liveAgentText(harness.events)).toContain(`envtail:ANTHROPIC_API_KEY=${claudeKey.slice(-4)}`)
       harness.agents.stopAll()
     } finally {
       process.env = saved

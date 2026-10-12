@@ -8,7 +8,7 @@ import type { Context } from "./context.ts"
 import { buildPreamble } from "./preamble.ts"
 import { attachWindow, getConversation } from "./registry.ts"
 import { refreshIdleTimer } from "./idle.ts"
-import { emit, flushSave, notify, pushThreads, record, scheduleSave, setStatus } from "./output.ts"
+import { emit, flushSave, notify, pushThreads, record, redact, scheduleSave, setStatus } from "./output.ts"
 import { cancelPendingPermissions } from "./stop.ts"
 import { readTurnContext } from "./turnContext.ts"
 
@@ -56,7 +56,7 @@ export async function handleChatPrompt(
   conversation.updatedAt = Date.now()
   if (conversation.title === undefined) {
     // The thread appears in the list as soon as it has a first message.
-    conversation.title = deriveTitle(message.text)
+    conversation.title = deriveTitle(redact(ctx, message.text))
     flushSave(ctx, conversation)
     pushThreads(ctx, conversation)
   }

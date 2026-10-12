@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { Session } from "../protocol.ts"
 import { conversationId, session, createHarness, notices, windowA, windowB, chatHistory, lastStatus, toolText, windowDocument, contextWindow } from "../testing/harness.ts"
+import { promptedBlocks } from "../testing/harness.ts"
 import type { Harness } from "../testing/harness.ts"
 import { secretToken, contextHeader, startStub } from "../testing/mcpStub.ts"
 import type { StubMode, Stub } from "../testing/mcpStub.ts"
@@ -37,9 +38,7 @@ describe("per-turn editor context read", () => {
     harness.events.length = 0
     await harness.agents.handleMessage(target, { type: "chat_prompt", text, session: stubSession })
     return {
-      blocks: harness.events.flatMap((event) =>
-        event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
-      ),
+      blocks: promptedBlocks(harness.events),
       events: [...harness.events],
     }
   }

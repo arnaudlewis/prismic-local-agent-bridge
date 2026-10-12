@@ -7,6 +7,7 @@ import {
   fakeAgentBin,
   liveAgentText,
   notices,
+  promptedBlocks,
   session,
   windowId,
 } from "../testing/harness.ts"
@@ -21,9 +22,7 @@ describe("the conversation machinery goes through the provider", () => {
   }
 
   function prompted(events: BridgeEvent[]): string[] {
-    return events.flatMap((event) =>
-      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
-    )
+    return promptedBlocks(events)
   }
 
   it("blocks the commands the provider says are blocked, not Codex's list", async () => {

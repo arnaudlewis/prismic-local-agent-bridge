@@ -2,6 +2,7 @@ import type { AgentProvider } from "../agents/provider.ts"
 import type { ConversationStore } from "../conversationStore.ts"
 import type { AgentId } from "../protocol.ts"
 import type { WindowChannels } from "../windowChannels.ts"
+import type { MessageRedactor } from "./redaction.ts"
 import type { Conversation } from "./types.ts"
 
 // A conversation with no window attached and no turn running is stopped (and dropped from memory) after this long.
@@ -36,8 +37,15 @@ export interface Context {
   windowConversations: Map<string, Conversation>
   // The repository and agent a window last worked with: the fallback for answering a chat_delete of an unknown id.
   windowScopes: Map<string, { repository: string; agent: AgentId }>
+  // The unfinished tail of an assistant message per conversation (see redaction.ts).
+  redactors: Map<string, MessageRedactor>
   // Monotonic counter behind Conversation.lastActiveAt.
   activity: { tick: number }
+}
+
+// Every secret any provider's credentials are made of.
+export function knownSecrets(ctx: Context): string[] {
+  return [...ctx.providers.values()].flatMap((provider) => provider.secretValues?.() ?? [])
 }
 
 export function providerOf(ctx: Context, conversation: Conversation): AgentProvider {

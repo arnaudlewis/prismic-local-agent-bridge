@@ -52,6 +52,7 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     initialConfig: () => ({ mode: "default" }),
 
     credentialEpoch: () => vault.credentialEpoch(),
+    secretValues: () => vault.knownKeys(),
 
     async authenticate() {
       // Before reading the key, never after: a key that changes in between must read as stale, not as fresh.

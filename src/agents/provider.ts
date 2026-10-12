@@ -51,6 +51,9 @@ export interface AgentProvider {
   // Bumped whenever the credentials may have changed (a key replaced or removed). The machinery compares it with
   // AgentCredentials.epoch to never start an agent with credentials that changed while it was getting ready.
   credentialEpoch?(): number
+  // Secrets this agent's credentials are made of (an API key), known to the daemon. Everything the daemon sends to the
+  // browser or stores has them replaced, in case the agent repeats one.
+  secretValues?(): string[]
   // Called once with a listener; the provider calls it when its credentials were removed, with the notice to show.
   // The conversations running on that agent are stopped at once (turns cancelled, approvals denied).
   onCredentialsRemoved?(listener: (notice: string) => void): void

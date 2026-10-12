@@ -4,7 +4,7 @@ import { createClaudeProvider } from "../agents/claude/claudeProvider.ts"
 import { createApiKeyVault } from "../secrets/apiKeyVault.ts"
 import { createMemorySecretStore } from "../testing/memorySecretStore.ts"
 import type { BridgeEvent } from "../protocol.ts"
-import { chatHistory, createHarness, editorContextEvents, fakeAgentBin, lastStatus, liveAgentText, notices, session, windowA, windowB } from "../testing/harness.ts"
+import { chatHistory, createHarness, editorContextEvents, fakeAgentBin, lastStatus, liveAgentText, notices, promptedBlocks, session, windowA, windowB } from "../testing/harness.ts"
 
 const key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
 const claudeSession = { ...session, agent: "claude" as const }
@@ -50,7 +50,7 @@ function commandNames(events: BridgeEvent[]): string[] {
 }
 
 function prompted(events: BridgeEvent[]): string[] {
-  return events.flatMap((event) => (event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : []))
+  return promptedBlocks(events)
 }
 
 describe("a conversation with the Claude agent", () => {
@@ -243,11 +243,11 @@ describe("the API key behind a conversation", () => {
     harness.events.length = 0
 
     for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "NO_BROWSER"]) {
-      await harness.agents.handleMessage(claudeChannel, { type: "chat_prompt", text: `echo-env ${name}`, session: claudeSession })
+      await harness.agents.handleMessage(claudeChannel, { type: "chat_prompt", text: `${name === "ANTHROPIC_API_KEY" ? "env-tail" : "echo-env"} ${name}`, session: claudeSession })
     }
 
     const text = liveAgentText(harness.events)
-    expect(text).toContain(`env:ANTHROPIC_API_KEY=${key}`)
+    expect(text).toContain(`envtail:ANTHROPIC_API_KEY=${key.slice(-4)}`)
     // The agent echoes each variable right after the previous one: an empty value is followed by the next echo.
     expect(text).toContain("env:ANTHROPIC_BASE_URL=env:CLAUDE_CODE_OAUTH_TOKEN=env:CLAUDE_CONFIG_DIR=")
     expect(text).not.toContain("inherited")
@@ -276,11 +276,11 @@ describe("the API key behind a conversation", () => {
 
     await vault.set("sk-ant-api03-REPLACEDREPLACEDREPLACED7777")
     harness.events.length = 0
-    await harness.agents.handleMessage(claudeChannel, { type: "chat_prompt", text: "echo-env ANTHROPIC_API_KEY", session: claudeSession })
+    await harness.agents.handleMessage(claudeChannel, { type: "chat_prompt", text: "env-tail ANTHROPIC_API_KEY", session: claudeSession })
 
     expect(notices(harness.events)).toEqual([])
-    expect(liveAgentText(harness.events)).toContain("env:ANTHROPIC_API_KEY=sk-ant-api03-REPLACEDREPLACEDREPLACED7777")
-    expect(liveAgentText(harness.events)).not.toContain(key)
+    expect(liveAgentText(harness.events)).toContain("envtail:ANTHROPIC_API_KEY=7777")
+    expect(liveAgentText(harness.events)).not.toContain(key.slice(-4))
   })
 
   it("does not restart a running turn when the key is replaced", async () => {
