@@ -31,6 +31,8 @@ import { createWindowChannels } from "./windowChannels.ts"
 const defaultPort = 7878
 const defaultOrigin = "http://localhost:5173"
 const defaultRefreshMarginMs = 300_000
+// The desktop app (desktop/src/bridgeProcess.ts) reads this exit code.
+const portInUseExitCode = 3
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error))
@@ -111,7 +113,7 @@ async function main(): Promise<void> {
     pairing,
     prismicAuth,
     channels,
-  })
+  }).catch((error: unknown) => exitWhenPortInUse(error, options.port))
 
   console.info(`${bridgeInfo.name} ${bridgeInfo.version}`)
   console.info(
@@ -132,12 +134,23 @@ async function main(): Promise<void> {
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
   console.info(`Prismic local agent bridge on http://127.0.0.1:${options.port}. Connect from the agent panel in the Page Builder.`)
 
+  let shuttingDown = false
   function shutdown(): void {
+    if (shuttingDown) return
+    shuttingDown = true
     agents.stopAll()
     void server.close().then(() => process.exit(0))
   }
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)
+  // The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it.
+  if (process.connected) process.once("disconnect", shutdown)
+}
+
+function exitWhenPortInUse(error: unknown, port: number): never {
+  if ((error as NodeJS.ErrnoException | null)?.code !== "EADDRINUSE") throw error
+  console.error(`Port ${port} is already in use (is another Prismic agent bridge running?)`)
+  process.exit(portInUseExitCode)
 }
 
 interface CliOptions {
