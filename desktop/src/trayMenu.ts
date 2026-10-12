@@ -1,6 +1,6 @@
 import { join } from "node:path"
 import { Menu, Tray, app, nativeImage, shell } from "electron"
-import type { MenuItemConstructorOptions } from "electron"
+import type { MenuItemConstructorOptions, NativeImage } from "electron"
 
 import type { BridgeProcess, BridgeState } from "./bridgeProcess.ts"
 import type { AvailableUpdate } from "./updateCheck.ts"
@@ -16,17 +16,33 @@ export interface TrayMenu {
   refresh(): void
 }
 
+type IconName = "trayGray" | "trayOrange" | "trayRed" | "trayGreen"
+
+function loadIcon(name: IconName): NativeImage {
+  return nativeImage.createFromPath(join(app.getAppPath(), "assets", `${name}.png`))
+}
+
 export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
   const { bridge, getUpdate, claudeCodeLogin } = args
-  // The "Template" suffix makes it a template image (tinted for the menu bar), and @2x is picked up automatically.
-  const tray = new Tray(nativeImage.createFromPath(join(app.getAppPath(), "assets", "trayTemplate.png")))
+  // Colored images, not template ones: a template image is tinted by the menu bar and can't be orange or green. @2x is
+  // picked up automatically.
+  const icons: Record<IconName, NativeImage> = {
+    trayGray: loadIcon("trayGray"),
+    trayOrange: loadIcon("trayOrange"),
+    trayRed: loadIcon("trayRed"),
+    trayGreen: loadIcon("trayGreen"),
+  }
+  const tray = new Tray(icons.trayGray)
   tray.setToolTip("Prismic Agent")
 
   function refresh(): void {
+    const state = bridge.state()
+    tray.setImage(icons[iconNameFor(state)])
     const update = getUpdate()
     const items: MenuItemConstructorOptions[] = [
       { label: `Prismic Agent ${app.getVersion()}`, enabled: false },
-      { label: statusLabel(bridge.state()), enabled: false },
+      { label: statusLabel(state), enabled: false },
+      ...editorLines(state),
       { type: "separator" },
       { label: "Restart", click: () => void bridge.restart() },
       { label: "Show Logs", click: () => void shell.openPath(app.getPath("logs")) },
@@ -65,7 +81,7 @@ function statusLabel(state: BridgeState): string {
     case "starting":
       return "Starting…"
     case "running":
-      return "Running: connect from the Page Builder"
+      return state.editors.length > 0 ? "Connected to the Page Builder" : "Running: connect from the Page Builder"
     case "port_in_use":
       return "Port 7878 is used by another program"
     case "restarting":
@@ -73,4 +89,24 @@ function statusLabel(state: BridgeState): string {
     case "stopped":
       return "Stopped"
   }
+}
+
+// Grey: off. Orange: starting, or running and waiting for a Page Builder. Red: error. Green: linked to a Page Builder.
+function iconNameFor(state: BridgeState): IconName {
+  switch (state.kind) {
+    case "stopped":
+      return "trayGray"
+    case "starting":
+      return "trayOrange"
+    case "running":
+      return state.editors.length > 0 ? "trayGreen" : "trayOrange"
+    case "port_in_use":
+    case "restarting":
+      return "trayRed"
+  }
+}
+
+function editorLines(state: BridgeState): MenuItemConstructorOptions[] {
+  if (state.kind !== "running") return []
+  return state.editors.map((origin) => ({ label: `Linked to ${URL.canParse(origin) ? new URL(origin).host : origin}`, enabled: false }))
 }

@@ -8,12 +8,15 @@ const recheckIntervalMs = 60_000
 
 type MessageListener = (windowId: string, message: ClientMessage) => void
 type WindowClosedListener = (windowId: string) => void
+type EditorsListener = (origins: string[]) => void
 
 export interface WindowAccess {
   // Called before every inbound message and periodically; once it returns false the socket is closed.
   isAuthorized(): boolean
   // The Prismic MCP origin of the pairing this socket authenticated with.
   mcpOrigin: string
+  // The Origin of the browser page that opened the socket.
+  origin: string
 }
 
 export interface WindowChannels {
@@ -23,6 +26,8 @@ export interface WindowChannels {
   send(windowId: string, event: BridgeEvent): void
   onMessage(listener: MessageListener): void
   onWindowClosed(listener: WindowClosedListener): void
+  // Called with the distinct page origins that have a socket attached, whenever that set changes.
+  onEditorsChanged(listener: EditorsListener): void
 }
 
 interface CreateWindowChannelsArgs {
@@ -34,6 +39,10 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
   const recheckMs = args.recheckIntervalMs ?? recheckIntervalMs
   const sockets = new Map<string, WebSocket>()
   const mcpOrigins = new Map<string, string>()
+  // The browser page (its Origin) behind each attached socket.
+  const editorOrigins = new Map<string, string>()
+  let lastEditorsKey = ""
+  const editorsListeners: EditorsListener[] = []
   const recheckTimers = new Map<WebSocket, NodeJS.Timeout>()
   const graceTimers = new Map<string, NodeJS.Timeout>()
   const messageListeners: MessageListener[] = []
@@ -53,10 +62,20 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
     recheckTimers.delete(socket)
   }
 
+  function notifyEditorsChanged(): void {
+    const origins = [...new Set(editorOrigins.values())].sort()
+    const key = origins.join(" ")
+    if (key === lastEditorsKey) return
+    lastEditorsKey = key
+    for (const listener of editorsListeners) listener(origins)
+  }
+
   function handleSocketClosed(windowId: string, socket: WebSocket): void {
     if (sockets.get(windowId) !== socket) return
     sockets.delete(windowId)
     mcpOrigins.delete(windowId)
+    editorOrigins.delete(windowId)
+    notifyEditorsChanged()
     const timer = setTimeout(() => {
       graceTimers.delete(windowId)
       for (const listener of windowClosedListeners) listener(windowId)
@@ -84,6 +103,8 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
         stopRecheck(previous)
         previous.close(4000, "replaced")
       }
+      editorOrigins.set(windowId, access.origin)
+      notifyEditorsChanged()
 
       // Returns false (and closes the socket) when the pairing behind it is gone.
       const stillAuthorized = () => {
@@ -122,6 +143,9 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
     },
     onWindowClosed(listener) {
       windowClosedListeners.push(listener)
+    },
+    onEditorsChanged(listener) {
+      editorsListeners.push(listener)
     },
   }
 }

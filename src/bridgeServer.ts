@@ -123,8 +123,8 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   server.on("upgrade", (req, socket, head) => {
     socket.on("error", () => socket.destroy())
     if (!isAllowedHost(req, port)) return rejectUpgrade(socket, 403, "Forbidden")
-    if (getAllowedOrigin(req, extraOrigins) === undefined) return rejectUpgrade(socket, 403, "Forbidden")
-    const origin = req.headers.origin
+    const origin = getAllowedOrigin(req, extraOrigins)
+    if (origin === undefined) return rejectUpgrade(socket, 403, "Forbidden")
 
     const url = parseOriginFormUrl(req.url, port)
     if (url === undefined) return rejectUpgrade(socket, 400, "Bad Request")
@@ -151,6 +151,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
       channels.attach(channelKey(windowId, agent.data), ws, {
         isAuthorized: () => pairing.validateToken(token, origin) !== undefined,
         mcpOrigin: paired.mcpOrigin,
+        origin,
       })
     })
   })

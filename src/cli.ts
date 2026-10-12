@@ -82,6 +82,11 @@ async function main(): Promise<void> {
     }),
   ]
   const channels = createWindowChannels()
+  // The desktop app (desktop/src/bridgeProcess.ts) shows which Page Builders are linked. The IPC channel is private
+  // to it, unlike /health, which any allowed page can read.
+  channels.onEditorsChanged((origins) => {
+    if (process.connected) process.send?.({ type: "editors", origins })
+  })
   const prismicAuth = await createPrismicAuth({ dataDir, port: options.port })
   const upstream = createMcpUpstream({ auth: prismicAuth })
   const grants = createAgentMcpGrants()

@@ -94,6 +94,7 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
     },
     onMessage: () => {},
     onWindowClosed: () => {},
+    onEditorsChanged: () => {},
   }
   const codex = createCodexProvider({
     dataDir,

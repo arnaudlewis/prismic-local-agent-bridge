@@ -34,7 +34,7 @@ function attach(
   mcpOrigin = "https://mcp.prismic.io",
 ): FakeSocket {
   const socket = new FakeSocket()
-  channels.attach(windowId, socket as unknown as WebSocket, { isAuthorized, mcpOrigin })
+  channels.attach(windowId, socket as unknown as WebSocket, { isAuthorized, mcpOrigin, origin: "http://localhost:5173" })
   return socket
 }
 
@@ -144,6 +144,31 @@ describe("createWindowChannels", () => {
 
     socket.emit("close")
     expect(channels.mcpOrigin(windowId)).toBeUndefined()
+  })
+
+  it("reports the distinct page origins that have a socket attached, only when that set changes", () => {
+    const channels = createWindowChannels()
+    const reported: string[][] = []
+    channels.onEditorsChanged((origins) => reported.push(origins))
+    const otherWindow = "22222222-2222-4222-8222-222222222222"
+    const thirdWindow = "33333333-3333-4333-8333-333333333333"
+    const attachTo = (id: string, origin: string) => {
+      const socket = new FakeSocket()
+      channels.attach(id, socket as unknown as WebSocket, { isAuthorized: () => true, mcpOrigin: "https://mcp.prismic.io", origin })
+      return socket
+    }
+
+    const first = attachTo(windowId, "http://localhost:5173")
+    const second = attachTo(otherWindow, "http://localhost:5173")
+    attachTo(thirdWindow, "https://app.example.com")
+    first.emit("close")
+    second.emit("close")
+
+    expect(reported).toEqual([
+      ["http://localhost:5173"],
+      ["http://localhost:5173", "https://app.example.com"],
+      ["https://app.example.com"],
+    ])
   })
 
   it("answers with the MCP origin of the replacing socket, also when the replaced one closes late", () => {

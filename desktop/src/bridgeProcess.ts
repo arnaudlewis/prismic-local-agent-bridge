@@ -7,7 +7,7 @@ import { join } from "node:path"
 
 export type BridgeState =
   | { kind: "starting" }
-  | { kind: "running" }
+  | { kind: "running"; editors: string[] }
   | { kind: "port_in_use" }
   | { kind: "restarting"; inSeconds: number }
   | { kind: "stopped" }
@@ -36,6 +36,7 @@ const portInUseExitCode = 3
 const healthUrl = "http://127.0.0.1:7878/health"
 const healthName = "prismic-local-agent-bridge"
 const healthIntervalMs = 500
+const maxHealthBytes = 1024
 const healthTimeoutMs = 1000
 const portRetryMs = 30_000
 const stableAfterMs = 60_000
@@ -71,11 +72,12 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     child = spawned
     spawned.stdout?.pipe(log, { end: false })
     spawned.stderr?.pipe(log, { end: false })
+    let editors: string[] = []
     setState({ kind: "starting" })
 
     const healthTimer = setInterval(() => {
       void isHealthy().then((healthy) => {
-        if (healthy && child === spawned && state.kind === "starting") setState({ kind: "running" })
+        if (healthy && child === spawned && state.kind === "starting") setState({ kind: "running", editors })
       })
     }, healthIntervalMs)
 
@@ -100,6 +102,12 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     }
     spawned.on("exit", onGone)
     spawned.on("error", () => onGone(null))
+    spawned.on("message", (message) => {
+      const reported = readEditors(message)
+      if (reported === undefined) return
+      editors = reported
+      if (state.kind === "running") setState({ kind: "running", editors })
+    })
   }
 
   function stop(): Promise<void> {
@@ -146,10 +154,15 @@ function openLog(logsDir: string): WriteStream {
 
 function isHealthy(): Promise<boolean> {
   const { promise, resolve } = Promise.withResolvers<boolean>()
-  const request = get(healthUrl, { timeout: healthTimeoutMs }, (response) => {
+  // The signal is a deadline for the whole response (the timeout option only fires on inactivity), and the body is
+  // capped: whoever owns the port, another local user included, must not be able to keep the app busy.
+  const request = get(healthUrl, { signal: AbortSignal.timeout(healthTimeoutMs) }, (response) => {
     let body = ""
     response.setEncoding("utf8")
-    response.on("data", (chunk: string) => (body += chunk))
+    response.on("data", (chunk: string) => {
+      body += chunk
+      if (body.length > maxHealthBytes) request.destroy()
+    })
     response.on("end", () => {
       try {
         const parsed: unknown = JSON.parse(body)
@@ -158,8 +171,18 @@ function isHealthy(): Promise<boolean> {
         resolve(false)
       }
     })
+    response.on("close", () => resolve(false))
+    response.on("error", () => resolve(false))
   })
-  request.on("timeout", () => request.destroy())
   request.on("error", () => resolve(false))
   return promise
+}
+
+// What the daemon reports over IPC (src/cli.ts): the page origins of the Page Builders linked to it.
+function readEditors(message: unknown): string[] | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "editors" || !("origins" in message)) return undefined
+  const { origins } = message
+  if (!Array.isArray(origins) || !origins.every((origin) => typeof origin === "string")) return undefined
+  return origins
 }

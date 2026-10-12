@@ -81,6 +81,7 @@ async function startProxy(args: ProxyArgs): Promise<Proxy> {
     send: (key, event) => void notices.push({ windowKey: key, event }),
     onMessage() {},
     onWindowClosed() {},
+    onEditorsChanged() {},
   }
   const server: BridgeServer = await startBridgeServer({
     port,
