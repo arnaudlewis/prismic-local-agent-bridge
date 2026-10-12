@@ -15,6 +15,7 @@ import { stopConversation } from "./conversations/idle.ts"
 import { handleSetConfigOption } from "./conversations/sessionConfig.ts"
 import { handleChatDelete, handleThreadsList } from "./conversations/threads.ts"
 import { handleChatCancel, handleChatPrompt } from "./conversations/turn.ts"
+import { channelAgent } from "./channelKey.ts"
 import { createConversationStore } from "./conversationStore.ts"
 import { errorMessage } from "./errors.ts"
 import type { AgentId, BridgeEvent, ClientMessage } from "./protocol.ts"
@@ -80,6 +81,17 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   sweepTimer.unref()
 
   async function handleMessage(windowId: string, message: ClientMessage): Promise<void> {
+    // A socket is opened for one agent: it can't drive the conversations of another.
+    const messageAgent = "session" in message ? message.session.agent : "agent" in message ? message.agent : undefined
+    const socketAgent = channelAgent(windowId)
+    if (messageAgent !== undefined && socketAgent !== undefined && messageAgent !== socketAgent) {
+      sendToWindow(ctx, windowId, {
+        type: "notice",
+        tone: "error",
+        text: `This connection is for the ${socketAgent} agent, not ${messageAgent}.`,
+      })
+      return
+    }
     switch (message.type) {
       case "chat_open":
         return handleChatOpen(ctx, windowId, message)

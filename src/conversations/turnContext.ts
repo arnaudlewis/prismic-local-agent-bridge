@@ -7,6 +7,7 @@ import {
   isEditorContextTool,
   summarizeEditorContext,
 } from "../editorContext.ts"
+import { browserWindowId } from "../channelKey.ts"
 import { readEditorContext } from "../editorContextClient.ts"
 import type { Session } from "../protocol.ts"
 import type { Context } from "./context.ts"
@@ -35,7 +36,7 @@ export async function readTurnContext(ctx: Context, args: ReadTurnContextArgs): 
   const outcome = await readEditorContext({
     mcpServerUrl: session.mcpServerUrl,
     prismicToken: session.prismicToken,
-    windowId,
+    windowId: browserWindowId(windowId),
     pinnedDocumentId: conversation.pinnedDocumentId,
     timeoutMs: ctx.config.contextReadTimeoutMs,
   })

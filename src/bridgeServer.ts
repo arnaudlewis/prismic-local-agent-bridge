@@ -15,7 +15,8 @@ import {
   sendJson,
 } from "./httpUtils.ts"
 import type { Pairing } from "./pairing.ts"
-import { bridgeInfo, windowIdPattern } from "./protocol.ts"
+import { channelKey } from "./channelKey.ts"
+import { AgentIdSchema, bridgeInfo, windowIdPattern } from "./protocol.ts"
 import type { StatusResponse } from "./protocol.ts"
 import type { WindowChannels } from "./windowChannels.ts"
 
@@ -59,7 +60,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
 
     if (method === "OPTIONS") {
       res.writeHead(204, {
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "Authorization, Content-Type",
         "Access-Control-Allow-Private-Network": "true",
         "Access-Control-Max-Age": "600",
@@ -133,6 +134,11 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     const windowId = windowPathPattern.exec(url.pathname)?.[1]
     if (windowId === undefined) return rejectUpgrade(socket, 404, "Not Found")
 
+    // The agent this socket is for; a browser from before several agents existed doesn't send one: Codex.
+    const requestedAgent = url.searchParams.get("agent") ?? "codex"
+    const agent = AgentIdSchema.safeParse(requestedAgent)
+    if (!agent.success) return rejectUpgrade(socket, 400, "Bad Request")
+
     const token = url.searchParams.get("token")
     wss.handleUpgrade(req, socket, head, (ws) => {
       // First, before anything else: a socket without an error listener turns a malformed frame (even one sent while
@@ -144,7 +150,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
       }
       // Authorization is re-checked on every message and periodically: a pairing that expired or was evicted after
       // the upgrade must not keep a socket usable.
-      channels.attach(windowId, ws, () => pairing.isValidToken(token))
+      channels.attach(channelKey(windowId, agent.data), ws, () => pairing.isValidToken(token))
     })
   })
 

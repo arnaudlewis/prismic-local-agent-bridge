@@ -423,3 +423,105 @@ describe("provider routes", () => {
     error.mockRestore()
   })
 })
+
+describe("one socket per window and agent", () => {
+  async function connect(port: number, token: string, query: string): Promise<{ socket: WebSocket; closed: Promise<number> }> {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}${query}`, {
+      headers: { Origin: origin },
+    })
+    const closed = new Promise<number>((resolve) => socket.once("close", resolve))
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve)
+      socket.once("error", reject)
+    })
+    return { socket, closed }
+  }
+
+  it("keeps the Codex and the Claude socket of the same window open side by side", async () => {
+    const pairing = createPairing({ onCodeChanged: () => {} })
+    const token = pairToken(pairing)
+    const { port, received } = await startServer(pairing)
+    const codex = await connect(port, token, "&agent=codex")
+    const claude = await connect(port, token, "&agent=claude")
+
+    codex.socket.send(JSON.stringify({ type: "chat_cancel" }))
+    claude.socket.send(JSON.stringify({ type: "chat_cancel" }))
+    await vi.waitFor(() => expect(received).toHaveLength(2))
+
+    expect(codex.socket.readyState).toBe(WebSocket.OPEN)
+    expect(claude.socket.readyState).toBe(WebSocket.OPEN)
+  })
+
+  it("still replaces a second socket for the same window and agent", async () => {
+    const pairing = createPairing({ onCodeChanged: () => {} })
+    const token = pairToken(pairing)
+    const { port } = await startServer(pairing)
+    const first = await connect(port, token, "&agent=claude")
+
+    await connect(port, token, "&agent=claude")
+
+    expect(await first.closed).toBe(4000)
+  })
+
+  it("treats a socket without an agent as a Codex one", async () => {
+    const pairing = createPairing({ onCodeChanged: () => {} })
+    const token = pairToken(pairing)
+    const { port } = await startServer(pairing)
+    const without = await connect(port, token, "")
+
+    await connect(port, token, "&agent=codex")
+
+    expect(await without.closed).toBe(4000)
+  })
+
+  it("rejects an unknown agent before the upgrade", async () => {
+    const pairing = createPairing({ onCodeChanged: () => {} })
+    const token = pairToken(pairing)
+    const { port } = await startServer(pairing)
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}&agent=gemini`, {
+      headers: { Origin: origin },
+    })
+
+    const status = await new Promise<number | undefined>((resolve) => {
+      socket.once("unexpected-response", (_request, response) => resolve(response.statusCode))
+      socket.once("open", () => resolve(undefined))
+      socket.once("error", () => {})
+    })
+
+    expect(status).toBe(400)
+  })
+
+  it("reports messages under a key that holds both the window and the agent", async () => {
+    const pairing = createPairing({ onCodeChanged: () => {} })
+    const token = pairToken(pairing)
+    const port = await freePort()
+    const channels = createWindowChannels()
+    const keys: string[] = []
+    channels.onMessage((key) => keys.push(key))
+    servers.push(
+      await startBridgeServer({ port, allowedOrigins: [origin], projectDir: "/tmp", providers: [], pairing, channels }),
+    )
+    const claude = await connect(port, token, "&agent=claude")
+
+    claude.socket.send(JSON.stringify({ type: "chat_cancel" }))
+
+    await vi.waitFor(() => expect(keys).toEqual([`${windowId}/claude`]))
+  })
+
+  it("keeps the authorization fence for each socket", async () => {
+    let time = 1_000_000
+    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time })
+    const token = pairToken(pairing)
+    const { port, received } = await startServer(pairing)
+    const claude = await connect(port, token, "&agent=claude")
+    const codex = await connect(port, token, "&agent=codex")
+
+    time += 31 * day
+    claude.socket.send(JSON.stringify({ type: "chat_cancel" }))
+    codex.socket.send(JSON.stringify({ type: "chat_cancel" }))
+
+    expect(await claude.closed).toBe(4401)
+    expect(await codex.closed).toBe(4401)
+    expect(received).toEqual([])
+  })
+})

@@ -5,6 +5,7 @@ import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream } from "@agentclie
 import type { Client, McpServer, RequestPermissionResponse } from "@agentclientprotocol/sdk"
 
 import { AgentAuthError } from "../agents/provider.ts"
+import { browserWindowId } from "../channelKey.ts"
 import type { AgentCredentials } from "../agents/provider.ts"
 import { errorMessage } from "../errors.ts"
 import { bridgeInfo } from "../protocol.ts"
@@ -173,7 +174,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
         url: session.mcpServerUrl,
         headers: [
           { name: "Authorization", value: `Bearer ${session.prismicToken}` },
-          { name: "X-Prismic-Window-Id", value: windowId },
+          { name: "X-Prismic-Window-Id", value: browserWindowId(windowId) },
         ],
       },
     ]

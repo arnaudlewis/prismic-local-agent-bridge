@@ -65,6 +65,16 @@ describe("per-turn editor context read", () => {
     })
   })
 
+  it("reads the context with the browser's window id when the channel is keyed by window and agent", async () => {
+    const { stub, harness, stubSession } = await setup()
+    const channel = `${windowB}/codex`
+    await harness.agents.handleMessage(channel, { type: "chat_open", session: stubSession })
+
+    await harness.agents.handleMessage(channel, { type: "chat_prompt", text: "what is here?", session: stubSession })
+
+    expect(stub.requests.at(-1)?.headers["x-prismic-window-id"]).toBe(windowB)
+  })
+
   it("appends a compact block with only the expected fields after the user's text", async () => {
     const { stub, harness, stubSession } = await setup()
     stub.payload = {

@@ -218,3 +218,40 @@ describe("the conversation machinery goes through the provider", () => {
     ).rejects.toThrow("This conversation belongs to another agent")
   })
 })
+
+describe("channels keyed by window and agent", () => {
+  const browserWindow = "99999999-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  const codexChannel = `${browserWindow}/codex`
+
+  it("refuses a message for another agent than the one the socket was opened for", async () => {
+    const harness = createHarness()
+
+    await harness.agents.handleMessage(codexChannel, { type: "chat_open", session: { ...session, agent: "claude" } })
+    await harness.agents.handleMessage(codexChannel, { type: "threads_list", repository: "repo", agent: "claude" })
+
+    expect(notices(harness.events)).toEqual([
+      "This connection is for the codex agent, not claude.",
+      "This connection is for the codex agent, not claude.",
+    ])
+    expect(harness.events.some((event) => event.type === "session_config" || event.type === "threads")).toBe(false)
+  })
+
+  it("works as before on the matching channel", async () => {
+    const harness = createHarness()
+
+    await harness.agents.handleMessage(codexChannel, { type: "chat_open", session })
+
+    expect(notices(harness.events)).toEqual([])
+    expect(harness.events.some((event) => event.type === "session_config")).toBe(true)
+  })
+
+  it("gives the MCP server the browser's window id in the agent's MCP headers, not the channel key", async () => {
+    const harness = createHarness()
+    await harness.agents.handleMessage(codexChannel, { type: "chat_open", session })
+
+    await harness.agents.handleMessage(codexChannel, { type: "chat_prompt", text: "echo-window", session })
+
+    expect(liveAgentText(harness.events)).toContain(`ctx:new:${browserWindow}`)
+    expect(liveAgentText(harness.events)).not.toContain("/codex:")
+  })
+})
