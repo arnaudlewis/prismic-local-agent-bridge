@@ -51,18 +51,22 @@ export function createKeyRoutes(args: KeyRoutesArgs): ProviderRoute[] {
         const { key } = body.data
         if (vault.storage() === "env") throw new HttpError(409, "managed_by_environment")
 
+        // Admitted: from here on a DELETE (or another PUT) that arrives while Anthropic is being asked wins.
+        const epoch = vault.beginMutation()
         const validation = await validate(key)
         if (validation === "invalid") throw new HttpError(400, "invalid_key")
         if (validation === "unavailable") throw new HttpError(502, "validation_unavailable")
 
+        let stored: boolean
         try {
-          await vault.set(key)
+          stored = await vault.setIfCurrent(key, epoch)
         } catch (error) {
           if (error instanceof KeyManagedByEnvironmentError) throw new HttpError(409, "managed_by_environment")
           // The store's own error text could carry detail about the key: say only that it failed.
           console.error("Could not store the Anthropic API key")
           throw new HttpError(500, "storage_failed")
         }
+        if (!stored) throw new HttpError(409, "superseded")
         res.writeHead(204)
         res.end()
       },

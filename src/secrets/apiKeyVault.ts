@@ -22,7 +22,18 @@ export class KeyManagedByEnvironmentError extends Error {}
 export interface ApiKeyVault {
   get(): Promise<StoredKey | undefined>
   set(key: string): Promise<void>
+  // Admits a mutation (a PUT): bumps the mutation epoch and returns it. Any earlier mutation still waiting on
+  // something slow (Anthropic's answer) is superseded.
+  beginMutation(): number
+  // Stores the key only if no other mutation (a DELETE, another PUT) was admitted since `epoch` was returned.
+  // Resolves false, storing nothing, when superseded.
+  setIfCurrent(key: string, epoch: number): Promise<boolean>
+  // Admits a removal at once (it supersedes every mutation in flight, and invalidates credentials that were just
+  // read), then removes the key. Everything that changes the stored key runs one at a time.
   remove(): Promise<void>
+  // Bumped whenever the stored key may have changed. A starting agent that read its credentials at an older value
+  // must not be started with them.
+  credentialEpoch(): number
   // Where a key would be kept if one were set now.
   storage(): KeyStorage
   status(): Promise<{ configured: boolean; keyHint?: string; storage: KeyStorage; error?: string }>
@@ -40,6 +51,16 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
   const { store } = args
   const readEnv = args.env ?? (() => process.env.ANTHROPIC_API_KEY)
   const salt = randomBytes(32)
+  let mutationEpoch = 0
+  let credentialEpoch = 0
+  let queue: Promise<unknown> = Promise.resolve()
+
+  // Mutations of the stored key are serialized: a write never interleaves with a removal.
+  function exclusive<T>(run: () => Promise<T>): Promise<T> {
+    const result = queue.then(run, run)
+    queue = result.catch(() => {})
+    return result
+  }
 
   function envKey(): string | undefined {
     const value = readEnv()?.trim()
@@ -53,15 +74,38 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     return stored === undefined ? undefined : { key: stored, storage: store.backend }
   }
 
+  async function storeKey(key: string): Promise<void> {
+    if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
+    // Before and after: whoever read the key while this runs must not trust what it read.
+    credentialEpoch += 1
+    await store.set(key)
+    credentialEpoch += 1
+  }
+
   return {
     get,
-    async set(key) {
-      if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
-      await store.set(key)
+    credentialEpoch: () => credentialEpoch,
+    beginMutation: () => (mutationEpoch += 1),
+    set: (key) => exclusive(() => storeKey(key)),
+    setIfCurrent(key, epoch) {
+      return exclusive(async () => {
+        if (mutationEpoch !== epoch) return false
+        await storeKey(key)
+        return true
+      })
     },
-    async remove() {
-      if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
-      await store.delete()
+    remove() {
+      // Synchronously, so that it also supersedes a PUT that is about to store its key.
+      mutationEpoch += 1
+      credentialEpoch += 1
+      return exclusive(async () => {
+        if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
+        try {
+          await store.delete()
+        } finally {
+          credentialEpoch += 1
+        }
+      })
     },
     storage: () => (envKey() === undefined ? store.backend : "env"),
     async status() {

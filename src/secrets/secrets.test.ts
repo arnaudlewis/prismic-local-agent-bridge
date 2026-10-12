@@ -270,4 +270,97 @@ describe("api key vault", () => {
     expect(first.fingerprint(key)).toMatch(/^[0-9a-f]{16}$/)
     expect(first.fingerprint(key)).not.toContain(key.slice(-4))
   })
+
+  describe("mutation and credential epochs", () => {
+    function fresh(stored?: string) {
+      const store = createMemorySecretStore(stored)
+      return { store, vault: createApiKeyVault({ store, env: () => undefined }) }
+    }
+
+    it("hands out increasing mutation epochs", () => {
+      const { vault: v } = fresh()
+
+      const first = v.beginMutation()
+      const second = v.beginMutation()
+
+      expect(second).toBeGreaterThan(first)
+    })
+
+    it("stores through setIfCurrent only while its epoch is the latest", async () => {
+      const { vault: v, store } = fresh()
+      const mine = v.beginMutation()
+
+      expect(await v.setIfCurrent(key, mine)).toBe(true)
+      expect(store.value()).toBe(key)
+
+      const stale = v.beginMutation()
+      v.beginMutation()
+      expect(await v.setIfCurrent("sk-ant-api03-STALESTALESTALESTALE0000", stale)).toBe(false)
+      expect(store.value()).toBe(key)
+    })
+
+    it("supersedes the mutations in flight as soon as remove() is called, before it has run", async () => {
+      const { vault: v, store } = fresh(key)
+      const mine = v.beginMutation()
+
+      const removal = v.remove()
+      const stored = await v.setIfCurrent("sk-ant-api03-LATELATELATELATELATE0000", mine)
+      await removal
+
+      expect(stored).toBe(false)
+      expect(store.value()).toBeUndefined()
+    })
+
+    it("runs a store and a removal one at a time, in the order they were admitted", async () => {
+      const order: string[] = []
+      const slow = createMemorySecretStore()
+      const originalSet = slow.set
+      slow.set = async (value) => {
+        order.push("set:start")
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        await originalSet(value)
+        order.push("set:end")
+      }
+      const originalDelete = slow.delete
+      slow.delete = async () => {
+        order.push("delete")
+        await originalDelete()
+      }
+      const v = createApiKeyVault({ store: slow, env: () => undefined })
+
+      const stored = v.set(key)
+      const removed = v.remove()
+      await Promise.all([stored, removed])
+
+      expect(order).toEqual(["set:start", "set:end", "delete"])
+      expect(slow.value()).toBeUndefined()
+    })
+
+    it("bumps the credential epoch when the key is stored and when it is removed, before and after", async () => {
+      const { vault: v } = fresh(key)
+      const start = v.credentialEpoch()
+
+      await v.set("sk-ant-api03-REPLACEDREPLACEDREPLACED7777")
+      const afterSet = v.credentialEpoch()
+      const removal = v.remove()
+      const duringRemoval = v.credentialEpoch()
+      await removal
+
+      expect(afterSet).toBeGreaterThan(start)
+      expect(duringRemoval).toBeGreaterThan(afterSet)
+      expect(v.credentialEpoch()).toBeGreaterThan(duringRemoval)
+    })
+
+    it("keeps working after a failed store: the queue is not stuck", async () => {
+      const { vault: v, store } = fresh()
+      const originalSet = store.set
+      store.set = () => Promise.reject(new Error("boom"))
+      await expect(v.set(key)).rejects.toThrow("boom")
+      store.set = originalSet
+
+      await v.set(key)
+
+      expect(store.value()).toBe(key)
+    })
+  })
 })

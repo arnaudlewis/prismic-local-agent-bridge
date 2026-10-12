@@ -37,6 +37,8 @@ interface Setup {
   validated: string[]
   removed: string[]
   setValidation(value: KeyValidation): void
+  // The next validations don't answer until the returned function is called.
+  holdValidation(): (value?: KeyValidation) => void
   advance(ms: number): void
   logs: unknown[][]
 }
@@ -50,9 +52,12 @@ async function setup(args: { stored?: string; env?: string; backend?: "keychain"
   const validated: string[] = []
   let validation: KeyValidation = "valid"
   let time = 1_000_000
+  const held: Array<(value: KeyValidation) => void> = []
+  let holding = false
   const validate: KeyValidator = (candidate) => {
     validated.push(candidate)
-    return Promise.resolve(validation)
+    if (!holding) return Promise.resolve(validation)
+    return new Promise<KeyValidation>((resolve) => held.push(resolve))
   }
   const provider = createClaudeProvider({ dataDir: "/tmp", vault, userClaudeHome: undefined, validateKey: validate, now: () => time })
   const removed: string[] = []
@@ -69,6 +74,13 @@ async function setup(args: { stored?: string; env?: string; backend?: "keychain"
     validated,
     removed,
     setValidation: (value) => void (validation = value),
+    holdValidation() {
+      holding = true
+      return (value = "valid") => {
+        holding = false
+        for (const resolve of held.splice(0)) resolve(value)
+      }
+    },
     advance: (ms) => void (time += ms),
     logs,
   }
@@ -356,5 +368,88 @@ describe("GET /status for claude", () => {
     expect(response.status).toBe(204)
     expect(response.headers.get("access-control-allow-methods")).toBe("GET, POST, PUT, DELETE, OPTIONS")
     expect(response.headers.get("access-control-allow-origin")).toBe(origin)
+  })
+})
+
+describe("credential mutations that overlap", () => {
+  const first = "sk-ant-api03-FIRSTFIRSTFIRSTFIRSTFIRST1111"
+  const second = "sk-ant-api03-SECONDSECONDSECONDSECOND2222"
+
+  async function put(s: Setup, body: unknown): Promise<Reply> {
+    return send(s, "PUT", { json: body })
+  }
+
+  async function waitForValidations(s: Setup, count: number): Promise<void> {
+    await vi.waitFor(() => expect(s.validated).toHaveLength(count))
+  }
+
+  it("answers 409 superseded and stores nothing when a DELETE completed while Anthropic was being asked", async () => {
+    const s = await setup({ stored: "sk-ant-api03-OLDOLDOLDOLDOLDOLDOLDOLD0000" })
+    const release = s.holdValidation()
+    const pending = put(s, { key })
+    await waitForValidations(s, 1)
+
+    expect((await send(s, "DELETE")).status).toBe(204)
+    expect(s.store.value()).toBeUndefined()
+    release("valid")
+    const reply = await pending
+
+    expect(reply.status).toBe(409)
+    expect(JSON.parse(reply.body)).toEqual({ error: "superseded" })
+    expect(s.store.value()).toBeUndefined()
+    expect(await status(s)).toMatchObject({ account: { status: "missing" } })
+  })
+
+  it("lets the last PUT win: the earlier one that answers later is superseded", async () => {
+    const s = await setup()
+    const release = s.holdValidation()
+    const earlier = put(s, { key: first })
+    await waitForValidations(s, 1)
+    const later = put(s, { key: second })
+    await waitForValidations(s, 2)
+
+    release("valid")
+    const replies = await Promise.all([earlier, later])
+
+    expect(replies.map((reply) => reply.status).sort()).toEqual([204, 409])
+    expect(s.store.value()).toBe(second)
+    expect(replies[0].status).toBe(409)
+  })
+
+  it("lets a PUT that was admitted after a DELETE store its key", async () => {
+    const s = await setup({ stored: first })
+    const release = s.holdValidation()
+    const pending = put(s, { key: second })
+    await waitForValidations(s, 1)
+
+    release("valid")
+    expect((await pending).status).toBe(204)
+    await send(s, "DELETE")
+    expect((await put(s, { key })).status).toBe(204)
+
+    expect(s.store.value()).toBe(key)
+  })
+
+  it("does not let a rejected or unreachable validation supersede anything stored", async () => {
+    const s = await setup({ stored: first })
+    s.setValidation("unavailable")
+
+    expect((await put(s, { key: second })).status).toBe(502)
+
+    expect(s.store.value()).toBe(first)
+  })
+
+  it("keeps the vault empty however many PUTs were in flight when the DELETE came", async () => {
+    const s = await setup()
+    const release = s.holdValidation()
+    const pending = [put(s, { key: first }), put(s, { key: second }), put(s, { key })]
+    await waitForValidations(s, 3)
+
+    await send(s, "DELETE")
+    release("valid")
+    const replies = await Promise.all(pending)
+
+    expect(replies.map((reply) => reply.status)).toEqual([409, 409, 409])
+    expect(s.store.value()).toBeUndefined()
   })
 })
