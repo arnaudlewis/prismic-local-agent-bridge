@@ -66,9 +66,19 @@ The mode (`mode` config option) starts from `--agent-mode` for every new session
 
 The `agent-full-access` mode (unrestricted file and network access) is disabled by default, because a page open in the browser can contain untrusted content. Without `--allow-full-access` the bridge removes that value from the `mode` option in every `session_config`, and answers a `set_config_option` for it with the notice "Full access is disabled. Restart the bridge with --allow-full-access to enable it." The banner shows `Full access: allowed` or `Full access: disabled`.
 
+## Threat model
+
+- **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization.
+- **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write` and `agent` (auto review) with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
+- **`--allow-full-access`** only gates the `agent-full-access` preset, the only mode that never asks for approval. It does not restrict the other modes.
+- **`--use-user-codex`:** the agent uses your Codex home, config, hooks and MCP servers, and all their tools become reachable from the browser (see "Codex home").
+- **Blocked commands:** `/logout` is account-global (it would sign out Codex outside the bridge). `/review`, `/review-branch`, `/review-commit` and `/goal` start turns that codex-acp runs outside the bridge's agent mode, sandbox and approval policy. They are removed from the command list and rejected on incoming prompts.
+
 ## Slash commands and skills
 
 codex-acp publishes its commands (built-ins such as `status`, `review`, `compact`, plus skills named `$<skill>`) in an `available_commands_update`. The bridge relays it as `{ "type": "available_commands", "commands": [{ "name", "description", "hint"? }] }` whenever it changes, and again after `session_config` on `chat_open`. `hint` comes from the command's input hint.
+
+The commands `/logout`, `/review`, `/review-branch`, `/review-commit` and `/goal` are blocked (see Threat model): they are removed from `available_commands`, and a prompt starting with one of them is not forwarded; the bridge answers with the notice "The /<name> command isn't available in the local agent." The other commands (`status`, `mcp`, `skills`, `plan`, `compact`, `rename`) and `$skill` prompts work.
 
 A prompt starting with `/<name>` is sent as plain text, exactly as typed, and stays the first content block, which is where codex-acp looks for a command. The Prismic preamble is not added to such a prompt. It is held back and added to the next regular prompt, because a handled command never reaches the model.
 

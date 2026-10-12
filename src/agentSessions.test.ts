@@ -66,7 +66,7 @@ function createHarness(args: { allowFullAccess: boolean }): Harness {
   }
   const agents = createAgentSessions({
     channels,
-    auth: { getAccessToken: () => Promise.resolve({ accessToken: "fake", expiresAt: Date.now() + 3_600_000 }) } as never,
+    auth: { getAccessToken: () => Promise.resolve({ accessToken: "fake", expiresAt: 9_999_999_999_999 }) } as never,
     dataDir: mkdtempSync(join(tmpdir(), "bridge-test-")),
     userCodexHome: undefined,
     allowFullAccess: args.allowFullAccess,
@@ -158,4 +158,58 @@ describe("preferredConfig", () => {
     await harness.agents.handleMessage(windowId, { type: "chat_open", session })
     expect(harness.lastMode()?.currentValue).toBe("read-only")
   })
+})
+
+describe("blocked commands", () => {
+  const blocked = ["logout", "review", "review-branch", "review-commit", "goal"]
+
+  function promptedTexts(events: BridgeEvent[]): string[] {
+    return events.flatMap((event) =>
+      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
+    )
+  }
+
+  it("never lists blocked commands but keeps the others", async () => {
+    const harness = createHarness({ allowFullAccess: false })
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+
+    const lists = harness.events.filter((event) => event.type === "available_commands")
+    expect(lists.length).toBeGreaterThan(0)
+    for (const list of lists) {
+      const names = list.commands.map((command) => command.name)
+      expect(names).toEqual(["status", "mcp", "plan", "compact", "rename", "$skill"])
+    }
+  })
+
+  it.each(blocked.flatMap((name) => [`/${name}`, `/${name.toUpperCase()} some args`, `  /${name}\n`]))(
+    "does not forward %j and answers with a notice",
+    async (text) => {
+      const harness = createHarness({ allowFullAccess: false })
+      await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+      harness.events.length = 0
+
+      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text, session })
+
+      const name = text.trim().slice(1).split(/\s/)[0]?.toLowerCase()
+      expect(promptedTexts(harness.events)).toEqual([])
+      expect(notices(harness.events)).toEqual([`The /${name} command isn't available in the local agent.`])
+      expect(harness.events.some((event) => event.type === "notice" && event.tone === "error")).toBe(true)
+      expect(harness.events.at(-1)).toEqual({ type: "chat_status", status: "idle" })
+    },
+  )
+
+  it.each(["/status", "/mcp", "/plan", "/compact", "/rename new name", "$skill", "/reviewer"])(
+    "still forwards %j",
+    async (text) => {
+      const harness = createHarness({ allowFullAccess: false })
+      await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+      harness.events.length = 0
+
+      await harness.agents.handleMessage(windowId, { type: "chat_prompt", text, session })
+
+      expect(notices(harness.events)).toEqual([])
+      expect(promptedTexts(harness.events)).toContain(text)
+      expect(harness.events.some((event) => event.type === "turn_end")).toBe(true)
+    },
+  )
 })

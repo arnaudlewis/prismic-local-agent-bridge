@@ -179,6 +179,12 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       sendNotice(windowId, "info", "A reply is already in progress.")
       return
     }
+    const blocked = blockedCommandName(message.text)
+    if (blocked !== undefined) {
+      sendNotice(windowId, "error", `The /${blocked} command isn't available in the local agent.`)
+      send(windowId, { type: "chat_status", status: "idle" })
+      return
+    }
     send(windowId, { type: "chat_status", status: "starting" })
     const ready = await ensureAgent(windowId, message.session)
     if (!ready) return
@@ -486,7 +492,9 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     const update = notification.update
     if (update.sessionUpdate === "available_commands_update") {
       // Kept even while replaying: it is session state, not history, and is re-sent once the agent is ready.
-      agent.availableCommands = update.availableCommands.map(toBridgeCommand)
+      agent.availableCommands = update.availableCommands
+        .map(toBridgeCommand)
+        .filter((command) => !blockedCommands.includes(command.name.toLowerCase()))
       if (!agent.replaying) sendAvailableCommands(windowId, agent)
       return
     }
@@ -623,6 +631,14 @@ export function toBridgeCommand(command: AvailableCommand): BridgeCommand {
 
 export function isSlashCommand(text: string): boolean {
   return /^\/[A-Za-z][\w-]*(\s|$)/.test(text.trim())
+}
+
+// Account-global commands, or ones that start turns outside the bridge's sandbox and approval policy.
+const blockedCommands = ["logout", "review", "review-branch", "review-commit", "goal"]
+
+function blockedCommandName(text: string): string | undefined {
+  const name = /^\/([A-Za-z][\w-]*)(\s|$)/.exec(text.trim())?.[1]?.toLowerCase()
+  return name !== undefined && blockedCommands.includes(name) ? name : undefined
 }
 
 const fullAccessValue = "agent-full-access"
