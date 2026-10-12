@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 
 import type { ToolIdentity } from "../editorContext.ts"
 import type { PairedBrowser } from "../pairing.ts"
+import type { AgentRuntime } from "./agentRuntime.ts"
 import type { AgentId, AgentStatus } from "../protocol.ts"
 
 // An agent the daemon can run over ACP. Everything the conversation machinery (src/conversations) needs to know
@@ -22,6 +23,8 @@ export interface AgentProvider {
   initialConfig?(): Record<string, string>
   // Notice sent when a stored agent session can't be resumed and a new one starts.
   readonly sessionRestartedNotice: string
+  // The native agent binary when it is downloaded on first use (packaged app); absent when the provider needs none.
+  readonly runtime?: AgentRuntime
 
   // Makes sure the agent can be started: refreshes or checks the account and returns what the child needs. Throws
   // AgentAuthError (with a user-facing notice) when it can't.

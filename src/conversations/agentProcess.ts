@@ -14,7 +14,7 @@ import { buildChildEnvironment } from "./childEnv.ts"
 import { providerOf } from "./context.ts"
 import type { Context } from "./context.ts"
 import { refreshIdleTimer } from "./idle.ts"
-import { flushHeldText, notify, scheduleSave, setStatus } from "./output.ts"
+import { flushHeldText, notify, scheduleSave, sendLive, setStatus } from "./output.ts"
 import { requestPermission } from "./permissions.ts"
 import { makeRoomForAgent } from "./registry.ts"
 import { applyInitialConfig, applySelectedConfig, sendAgentState } from "./sessionConfig.ts"
@@ -97,6 +97,31 @@ async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId
   const current = conversation.process
   if (current !== undefined && (current.turnActive || sameStartedWith(current.startedWith, startedWith))) {
     return "ready"
+  }
+
+  const runtime = provider.runtime
+  if (runtime !== undefined && !runtime.isReady()) {
+    // Live only: a progress line has no place in the stored transcript.
+    sendLive(ctx, conversation, {
+      type: "notice",
+      tone: "info",
+      text: `Downloading ${provider.label} for this computer (${runtime.sizeLabel}). This happens only once.`,
+    })
+    try {
+      await runtime.ensure()
+    } catch (error) {
+      if (conversation.generation !== entryGeneration) return abandon(ctx, conversation)
+      notify(
+        ctx,
+        conversation,
+        "error",
+        `Couldn't download ${provider.label}: ${errorMessage(error)}. Send a message to try again.`,
+      )
+      setStatus(ctx, conversation, "idle")
+      return "failed"
+    }
+    if (conversation.generation !== entryGeneration) return abandon(ctx, conversation)
+    if (isStale()) return "stale"
   }
 
   const stopped = stopAgent(ctx, conversation)

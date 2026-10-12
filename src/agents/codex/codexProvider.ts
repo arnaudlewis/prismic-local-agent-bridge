@@ -2,6 +2,7 @@ import { sendHtml, sendJson } from "../../httpUtils.ts"
 import { errorMessage } from "../../errors.ts"
 import { AgentAuthError } from "../provider.ts"
 import type { AgentProvider, ProviderRoute } from "../provider.ts"
+import type { AgentRuntime } from "../agentRuntime.ts"
 import { ChatGptAuthError } from "./chatgptAuth.ts"
 import type { ChatGptAuth, ChatGptAuthErrorCode } from "./chatgptAuth.ts"
 import { blockedCommands, hiddenCommands, nativeCommandName } from "./commands.ts"
@@ -27,11 +28,13 @@ export interface CodexProviderArgs {
   refreshMarginMs: number
   // Overrides the codex-acp entry point; only tests pass it.
   agentBin?: string
+  // Downloads the Codex binary on first use; absent when node_modules has it.
+  runtime?: AgentRuntime
 }
 
 // Codex over ACP (codex-acp), billed on the user's ChatGPT plan through "Sign in with ChatGPT".
 export function createCodexProvider(args: CodexProviderArgs): AgentProvider {
-  const { dataDir, auth, userCodexHome, agentMode, model, refreshMarginMs, agentBin } = args
+  const { dataDir, auth, userCodexHome, agentMode, model, refreshMarginMs, agentBin, runtime } = args
 
   return {
     id: "codex",
@@ -39,6 +42,7 @@ export function createCodexProvider(args: CodexProviderArgs): AgentProvider {
     blockedCommands,
     hiddenCommands,
     protectedConfigIds: ["mode"],
+    runtime,
     sessionRestartedNotice:
       "Started a new agent session after renewing the ChatGPT token; earlier messages aren't in the agent's memory.",
 
@@ -62,6 +66,7 @@ export function createCodexProvider(args: CodexProviderArgs): AgentProvider {
         args: [agentBin ?? resolveCodexAcpBin()],
         env: {
           ...codexEnv,
+          ...runtime?.env(),
           MODEL_PROVIDER: "openai_chatgpt_plan",
           INITIAL_AGENT_MODE: agentMode,
           NO_BROWSER: "1",

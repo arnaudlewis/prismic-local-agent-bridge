@@ -1,5 +1,6 @@
 import { AgentAuthError } from "../provider.ts"
 import type { AgentProvider } from "../provider.ts"
+import type { AgentRuntime } from "../agentRuntime.ts"
 import type { ApiKeyVault } from "../../secrets/apiKeyVault.ts"
 import { blockedCommands, commandNameCandidates, hiddenCommands, nativeCommandName } from "./commands.ts"
 import { ensureIsolatedClaudeHome, isolatedClaudeHomePath, resolveClaudeAcpBin } from "./claudeConfig.ts"
@@ -17,6 +18,8 @@ export interface ClaudeProviderArgs {
   userClaudeHome: string | undefined
   // Overrides the claude-agent-acp entry point; only tests pass it.
   agentBin?: string
+  // Downloads the Claude Code binary on first use; absent when node_modules has it.
+  runtime?: AgentRuntime
   // Replaces the request to Anthropic that checks a new key; only tests pass it.
   validateKey?: KeyValidator
   now?: () => number
@@ -27,7 +30,7 @@ export interface ClaudeProviderArgs {
 // runs with an API key in its environment (which outranks any stored login), with --hide-claude-auth (which makes it
 // refuse a session a subscription would pay for) and, by default, in an empty configuration directory of its own.
 export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
-  const { dataDir, vault, userClaudeHome, agentBin } = args
+  const { dataDir, vault, userClaudeHome, agentBin, runtime } = args
   const removedListeners: Array<(notice: string) => void> = []
 
   const routes = createKeyRoutes({
@@ -45,6 +48,7 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     blockedCommands,
     hiddenCommands,
     protectedConfigIds: ["mode"],
+    runtime,
     sessionRestartedNotice: "Started a new agent session; earlier messages aren't in the agent's memory.",
 
     // The user's own settings (--use-user-claude) may default to a mode that never asks (bypassPermissions): every
@@ -69,7 +73,7 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
         command: process.execPath,
         // --hide-claude-auth: refuse every session and turn a claude.ai subscription would pay for.
         args: [agentBin ?? resolveClaudeAcpBin(), "--hide-claude-auth"],
-        env: { CLAUDE_CONFIG_DIR: configDir, NO_BROWSER: "1", DISABLE_AUTOUPDATER: "1" },
+        env: { CLAUDE_CONFIG_DIR: configDir, NO_BROWSER: "1", DISABLE_AUTOUPDATER: "1", ...runtime?.env() },
       }
     },
 

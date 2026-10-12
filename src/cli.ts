@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
 
+import { claudeRuntimeArgs, codexRuntimeArgs, createAgentRuntime, daemonRootDir } from "./agents/agentRuntime.ts"
 import { resolveUserClaudeHome } from "./agents/claude/claudeConfig.ts"
 import { createClaudeProvider } from "./agents/claude/claudeProvider.ts"
 import { createChatGptAuth } from "./agents/codex/chatgptAuth.ts"
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
       agentMode: options.agentMode,
       model: options.model,
       refreshMarginMs: options.refreshMarginMs,
+      runtime: createAgentRuntime({ dataDir, rootDir: daemonRootDir, ...codexRuntimeArgs() }),
     }),
     createClaudeProvider({
       dataDir,
@@ -73,6 +75,7 @@ async function main(): Promise<void> {
         await createDefaultSecretStores({ dataDir, name: "claude-api-key", label: "Anthropic API key" }),
       ),
       userClaudeHome,
+      runtime: createAgentRuntime({ dataDir, rootDir: daemonRootDir, ...claudeRuntimeArgs() }),
     }),
   ]
   const channels = createWindowChannels()
