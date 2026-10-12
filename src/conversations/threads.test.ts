@@ -3,12 +3,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
-import { conversationId, session, createHarness, windowA, windowB, chatHistory, agentText, liveAgentText, conversationFile, conversationIdFor, sessionFor, windowFor, openAndPrompt, writeStored, threadEvents, lastThreads, indexFile, readIndex, pause } from "../testing/harness.ts"
+import { conversationId, session, createHarness, windowA, windowB, chatHistory, agentText, liveAgentText, conversationFile, conversationIdFor, sessionFor, windowFor, openAndPrompt, openScope, writeStored, threadEvents, lastThreads, indexFile, readIndex, pause } from "../testing/harness.ts"
 import type { Harness } from "../testing/harness.ts"
 
 describe("thread list", () => {
   async function list(harness: Harness, repository = "repo", target = windowA) {
-    harness.eventsFor(target).length = 0
+    await openScope(harness, target, repository)
     await harness.agents.handleMessage(target, { type: "threads_list", repository, agent: "codex" })
     return lastThreads(harness.eventsFor(target))
   }
@@ -16,6 +16,7 @@ describe("thread list", () => {
   it("answers threads_list directly with { type: 'threads', threads: [{ conversationId, title, updatedAt }] }", async () => {
     const harness = createHarness()
     writeStored(harness.dataDir, conversationIdFor(1), { title: "First", updatedAt: 1000 })
+    await openScope(harness, windowA)
 
     await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
 
@@ -101,7 +102,7 @@ describe("thread list", () => {
 
 describe("thread index", () => {
   async function list(harness: Harness) {
-    harness.eventsFor(windowA).length = 0
+    await openScope(harness, windowA)
     await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     return lastThreads(harness.eventsFor(windowA))
   }
@@ -208,6 +209,7 @@ describe("thread index", () => {
 
     expect(existsSync(join(harness.dataDir, "conversations", `${conversationIdFor(1)}.json`))).toBe(false)
     expect(readIndex(harness.dataDir).entries.map((entry) => entry.title)).toEqual(["Recent"])
+    await openScope(restarted, windowA)
     await restarted.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     expect(lastThreads(restarted.eventsFor(windowA))?.map((thread) => thread.title)).toEqual(["Recent"])
   })
@@ -310,6 +312,7 @@ describe("chat_delete", () => {
     const harness = createHarness()
     writeStored(harness.dataDir, conversationIdFor(1), { title: "Stored", updatedAt: 1 })
     writeStored(harness.dataDir, conversationIdFor(2), { title: "Kept", updatedAt: 2 })
+    await openScope(harness, windowA)
 
     await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId: conversationIdFor(1) })
 
@@ -335,6 +338,7 @@ describe("chat_delete", () => {
   it("answers an unknown id with the current list and changes nothing", async () => {
     const harness = createHarness()
     writeStored(harness.dataDir, conversationIdFor(1), { title: "Known", updatedAt: 1 })
+    await openScope(harness, windowA)
     await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "repo", agent: "codex" })
     harness.eventsFor(windowA).length = 0
 
@@ -454,5 +458,125 @@ describe("switching threads", () => {
     await harness.agents.handleMessage(windowA, { type: "chat_open", session: sessionFor(2), preferredConfig: { mode: "agent-full-access" } })
 
     expect(harness.lastMode()?.currentValue).toBe("read-only")
+  })
+})
+
+describe("thread list scope", () => {
+  async function ask(harness: Harness, target: string, repository: string) {
+    harness.eventsFor(target).length = 0
+    await harness.agents.handleMessage(target, { type: "threads_list", repository, agent: "codex" })
+    return lastThreads(harness.eventsFor(target))
+  }
+
+  function seed(harness: Harness): void {
+    writeStored(harness.dataDir, conversationIdFor(1), { repository: "repo", title: "Mine", updatedAt: 2 })
+    writeStored(harness.dataDir, conversationIdFor(2), { repository: "other", title: "Secret of another repository", updatedAt: 1 })
+  }
+
+  it("answers an empty list to a window that never sent a session", async () => {
+    const harness = createHarness()
+    seed(harness)
+
+    expect(await ask(harness, windowA, "repo")).toEqual([])
+    expect(await ask(harness, windowA, "other")).toEqual([])
+  })
+
+  it("lists the repository of the window's session, and nothing for another one", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openScope(harness, windowA, "repo")
+
+    expect((await ask(harness, windowA, "repo"))?.map((thread) => thread.title)).toEqual(["Mine"])
+    expect(await ask(harness, windowA, "other")).toEqual([])
+    expect(JSON.stringify(harness.eventsFor(windowA))).not.toContain("Secret of another repository")
+  })
+
+  it("always answers with a threads event, even when it is empty", async () => {
+    const harness = createHarness()
+    seed(harness)
+
+    await harness.agents.handleMessage(windowA, { type: "threads_list", repository: "other", agent: "codex" })
+
+    expect(harness.eventsFor(windowA)).toEqual([{ type: "threads", threads: [] }])
+  })
+
+  it("follows the window's last accepted session", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openScope(harness, windowA, "repo")
+    expect((await ask(harness, windowA, "other"))).toEqual([])
+
+    await openScope(harness, windowA, "other")
+
+    expect((await ask(harness, windowA, "other"))?.map((thread) => thread.title)).toEqual(["Secret of another repository"])
+    expect(await ask(harness, windowA, "repo")).toEqual([])
+  })
+
+  it("is set by chat_prompt as well, not by threads_list itself", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "hi", session: { ...sessionFor(5), repository: "other" } })
+
+    expect((await ask(harness, windowA, "other"))?.map((thread) => thread.title).sort()).toEqual(["Secret of another repository", "hi"])
+    // Asking for a repository doesn't give the window access to it.
+    expect(await ask(harness, windowB, "other")).toEqual([])
+    expect(await ask(harness, windowB, "other")).toEqual([])
+  })
+
+  it("is forgotten when the window closes", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openScope(harness, windowA, "repo")
+    expect(await ask(harness, windowA, "repo")).not.toEqual([])
+
+    harness.agents.detachWindow(windowA)
+
+    expect(await ask(harness, windowA, "repo")).toEqual([])
+  })
+
+  it("is not set by a session that was refused", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openScope(harness, windowB, "repo")
+    // Conversation 990 already belongs to codex: a session claiming another agent is refused before it is accepted.
+    await expect(
+      harness.agents.handleMessage(windowA, {
+        type: "chat_open",
+        session: { ...session, conversationId: conversationIdFor(990), agent: "other" as never, repository: "other" },
+      }),
+    ).rejects.toThrow("This conversation belongs to another agent")
+
+    expect(await ask(harness, windowA, "other")).toEqual([])
+  })
+
+  it("answers chat_delete with the window's own list, never another repository's", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openScope(harness, windowA, "repo")
+    harness.eventsFor(windowA).length = 0
+
+    await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId: conversationIdFor(2) })
+
+    expect(harness.eventsFor(windowA)).toEqual([
+      { type: "threads", threads: [{ conversationId: conversationIdFor(1), title: "Mine", updatedAt: 2 }] },
+    ])
+    expect(JSON.stringify(harness.eventsFor(windowA))).not.toContain("Secret of another repository")
+  })
+
+  it("answers chat_delete from a window without a session with an empty list", async () => {
+    const harness = createHarness()
+    seed(harness)
+
+    await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId: conversationIdFor(99) })
+
+    expect(harness.eventsFor(windowA)).toEqual([{ type: "threads", threads: [] }])
+  })
+
+  it("keeps pushing the window's own list after its turns", async () => {
+    const harness = createHarness()
+    seed(harness)
+    await openAndPrompt(harness, 3, "mine too")
+
+    expect(lastThreads(harness.eventsFor(windowFor(3)))?.map((thread) => thread.title).sort()).toEqual(["Mine", "mine too"])
   })
 })

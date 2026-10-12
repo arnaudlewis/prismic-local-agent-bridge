@@ -229,3 +229,13 @@ export function readIndex(dataDir: string): { version: number; entries: Array<{ 
 
 export const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+
+// Gives a window a scope (the repository of its last accepted session) without leaving events behind: threads_list
+// is answered for that repository only.
+export async function openScope(harness: Harness, target: string, repository = "repo"): Promise<void> {
+  await harness.agents.handleMessage(target, {
+    type: "chat_open",
+    session: { ...session, conversationId: conversationIdFor(990), repository },
+  })
+  harness.eventsFor(target).length = 0
+}

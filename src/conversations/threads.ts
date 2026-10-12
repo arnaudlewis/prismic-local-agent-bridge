@@ -5,19 +5,22 @@ import { sendToWindow } from "./output.ts"
 import { stopAgent } from "./stop.ts"
 import type { Conversation } from "./types.ts"
 
+// A window only sees the threads of the repository of its last accepted session (chat_open / chat_prompt): what it
+// asks for beyond that, or before it has a session at all, is an empty list, so titles of other repositories are
+// never enumerated.
 export function handleThreadsList(
   ctx: Context,
   windowId: string,
   message: Extract<ClientMessage, { type: "threads_list" }>,
 ): void {
-  ctx.windowScopes.set(windowId, { repository: message.repository, agent: message.agent })
-  sendToWindow(ctx, windowId, {
-    type: "threads",
-    threads: ctx.store.listThreads(message.repository, message.agent),
-  })
+  const scope = ctx.windowScopes.get(windowId)
+  const threads =
+    scope?.repository === message.repository ? ctx.store.listThreads(message.repository, message.agent) : []
+  sendToWindow(ctx, windowId, { type: "threads", threads })
 }
 
 // Only conversations the daemon knows (running, or in the index) can be deleted: an unknown id changes nothing.
+// The answer is the window's own list, whatever the deleted conversation was.
 export function handleChatDelete(
   ctx: Context,
   windowId: string,
@@ -25,11 +28,8 @@ export function handleChatDelete(
 ): void {
   const id = message.conversationId
   const conversation = ctx.conversations.get(id)
-  const indexed = ctx.store.threadOf(id)
-  const known = conversation ?? indexed
-  if (known !== undefined) deleteConversation(ctx, id, conversation)
-  // The list the window was looking at: the deleted conversation's, or, for an unknown id, the window's own.
-  const scope = known ?? ctx.windowScopes.get(windowId)
+  if (conversation !== undefined || ctx.store.threadOf(id) !== undefined) deleteConversation(ctx, id, conversation)
+  const scope = ctx.windowScopes.get(windowId)
   const threads = scope === undefined ? [] : ctx.store.listThreads(scope.repository, scope.agent)
   sendToWindow(ctx, windowId, { type: "threads", threads })
 }
