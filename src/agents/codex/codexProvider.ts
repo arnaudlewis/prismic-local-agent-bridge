@@ -96,6 +96,12 @@ export function createCodexProvider(args: CodexProviderArgs): AgentProvider {
       }
     },
 
+    async accountSummary() {
+      const status = auth.getStatus()
+      if (status.status !== "signed_in") return "Codex: not signed in"
+      return `Codex: ${status.email ?? "signed in with ChatGPT"}`
+    },
+
     bannerLines() {
       return [
         `Agent mode: ${agentMode}${model === undefined ? "" : `, model: ${model}`}`,

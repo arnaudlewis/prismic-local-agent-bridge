@@ -35,6 +35,7 @@ function createControlledRuntime() {
     sizeLabel: "about 120 MB",
     isReady: () => ready,
     env: () => ({}),
+    binaryPath: () => undefined,
     ensure() {
       return new Promise<void>((resolve, reject) => {
         calls.push({

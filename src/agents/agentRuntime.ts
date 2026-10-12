@@ -14,6 +14,8 @@ export interface AgentRuntime {
   isReady(): boolean
   // Points the ACP adapter at the downloaded binary; {} when node_modules has it.
   env(): Record<string, string>
+  // Where the binary is when it can be run now (downloaded, or in node_modules), else undefined.
+  binaryPath(): string | undefined
   // Downloads, checks and unpacks the package once; concurrent calls share one download. Rejects with a short reason.
   ensure(): Promise<void>
 }
@@ -49,7 +51,9 @@ export function createAgentRuntime(args: CreateAgentRuntimeArgs): AgentRuntime {
   const installedInNodeModules = existsSync(join(rootDir, "node_modules", packageName, "package.json"))
   const locked = installedInNodeModules ? undefined : readLockedPackage(rootDir, packageName)
   if (locked === undefined) {
-    return { sizeLabel, isReady: () => true, env: () => ({}), ensure: () => Promise.resolve() }
+    // In node_modules, or a platform the lockfile doesn't list (the SDK finds its own binary there).
+    const binaryPath = installedInNodeModules ? join(rootDir, "node_modules", packageName, executable) : undefined
+    return { sizeLabel, isReady: () => true, env: () => ({}), binaryPath: () => binaryPath, ensure: () => Promise.resolve() }
   }
 
   const runtimesDir = join(dataDir, "runtimes")
@@ -66,6 +70,7 @@ export function createAgentRuntime(args: CreateAgentRuntimeArgs): AgentRuntime {
     sizeLabel,
     isReady,
     env: () => (isReady() ? { [envName]: join(target, executable) } : {}),
+    binaryPath: () => (isReady() ? join(target, executable) : undefined),
     ensure() {
       if (isReady()) return Promise.resolve()
       if (pending === undefined) {

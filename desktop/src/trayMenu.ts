@@ -46,6 +46,7 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
       { label: `Prismic Agent ${app.getVersion()}`, enabled: false },
       { label: statusLabel(state), enabled: false },
       ...editorLines(state),
+      ...accountLines(bridge.accounts()),
       { type: "separator" },
       { label: "Restart", click: () => void bridge.restart() },
       { label: "Show Logs", click: () => void shell.openPath(app.getPath("logs")) },
@@ -123,4 +124,10 @@ function iconNameFor(state: BridgeState): IconName {
 function editorLines(state: BridgeState): MenuItemConstructorOptions[] {
   if (state.kind !== "running") return []
   return state.editors.map((origin) => ({ label: `Linked to ${URL.canParse(origin) ? new URL(origin).host : origin}`, enabled: false }))
+}
+
+// Who the daemon runs as (an email, a plan), as the daemon describes it. Empty until it has reported.
+function accountLines(accounts: string[]): MenuItemConstructorOptions[] {
+  if (accounts.length === 0) return []
+  return [{ type: "separator" }, ...accounts.map((line): MenuItemConstructorOptions => ({ label: line, enabled: false }))]
 }

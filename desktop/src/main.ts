@@ -32,6 +32,7 @@ function run(): void {
     logsDir: app.getPath("logs"),
     extraArgs: () => (state?.get().claudeCodeLogin === true ? ["--claude-code-login"] : []),
     onChange: onBridgeChange,
+    onAccounts: () => tray?.refresh(),
   })
 
   // A prismic-agent:// link launches the app. Any website can open one, so the URL's content is ignored.

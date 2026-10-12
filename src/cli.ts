@@ -33,6 +33,7 @@ const defaultOrigin = "http://localhost:5173"
 const defaultRefreshMarginMs = 300_000
 // The desktop app (desktop/src/bridgeProcess.ts) reads this exit code.
 const portInUseExitCode = 3
+const accountsRefreshMs = 30_000
 
 // The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it. The
 // listener is registered before anything is awaited: a disconnect during startup must not leave a daemon nobody
@@ -93,6 +94,8 @@ async function main(): Promise<void> {
   // to it, unlike /health, which any allowed page can read.
   channels.onEditorsChanged((origins) => {
     if (process.connected) process.send?.({ type: "editors", origins })
+    // A Page Builder that just connected is often where the user signed in.
+    publishAccounts()
   })
   const prismicAuth = await createPrismicAuth({ dataDir, port: options.port })
   // The desktop app signs the daemon out of its OAuth accounts from its menu, over the same private IPC channel.
@@ -104,6 +107,7 @@ async function main(): Promise<void> {
       .then(() => true, () => false)
       .then((ok) => {
         if (process.connected) process.send?.({ type: "signed_out", account, ok })
+        publishAccounts()
       })
   })
   const upstream = createMcpUpstream({ auth: prismicAuth })
@@ -157,6 +161,25 @@ async function main(): Promise<void> {
   if (options.passEnv.length > 0) console.info(`Passing to the agents (--pass-env): ${options.passEnv.join(", ")}`)
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
   console.info(`Prismic local agent bridge on http://127.0.0.1:${options.port}. Connect from the agent panel in the Page Builder.`)
+  publishAccounts()
+  setInterval(publishAccounts, accountsRefreshMs).unref()
+
+  // The desktop app shows who the daemon runs as (an email, a plan): over the private IPC channel, never the browser.
+  function publishAccounts(): void {
+    if (!process.connected) return
+    void describeAccounts().then((accounts) => {
+      if (process.connected) process.send?.({ type: "accounts", accounts })
+    })
+  }
+
+  async function describeAccounts(): Promise<string[]> {
+    const users = prismicAuth.signedInUsers()
+    const lines = [users.length === 0 ? "Prismic: not signed in" : `Prismic: signed in as ${users.join(", ")}`]
+    for (const provider of providers) {
+      if (provider.accountSummary !== undefined) lines.push(await provider.accountSummary().catch(() => `${provider.label}: unknown`))
+    }
+    return lines
+  }
 
   let shuttingDown = false
   function shutdown(): void {

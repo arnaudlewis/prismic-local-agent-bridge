@@ -20,6 +20,8 @@ export interface CreateBridgeProcessArgs {
   // Read at every start, so a restart picks up an option the user just changed.
   extraArgs: () => string[]
   onChange: (state: BridgeState) => void
+  // Called when the daemon reports its accounts again.
+  onAccounts: () => void
 }
 
 export type SignOutAccount = "prismic" | "chatgpt"
@@ -32,6 +34,8 @@ export interface BridgeProcess {
   startIfStopped(): void
   isStopped(): boolean
   state(): BridgeState
+  // One line per account the daemon runs as (Prismic, Codex, Claude); empty until it has reported.
+  accounts(): string[]
 }
 
 // The daemon exits with this code when its port is taken (portInUseExitCode in src/cli.ts).
@@ -49,13 +53,15 @@ const maxLogBytes = 5 * 1024 * 1024
 const restartDelaysSeconds = [1, 2, 5, 10, 30, 60]
 
 export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProcess {
-  const { nodePath, cliPath, cwd, logsDir, extraArgs, onChange } = args
+  const { nodePath, cliPath, cwd, logsDir, extraArgs, onChange, onAccounts } = args
   let state: BridgeState = { kind: "stopped" }
   let child: ChildProcess | undefined
   let retryTimer: NodeJS.Timeout | undefined
   let stopRequested = false
   let crashes = 0
   const signOutWaiters = new Map<SignOutAccount, (ok: boolean) => void>()
+  // Who the daemon runs as, as lines for the menu (src/cli.ts).
+  let accounts: string[] = []
 
   function setState(next: BridgeState): void {
     state = next
@@ -100,6 +106,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       handled = true
       clearInterval(healthTimer)
       child = undefined
+      accounts = []
       if (stopRequested) return setState({ kind: "stopped" })
       if (code === portInUseExitCode) {
         setState({ kind: "port_in_use" })
@@ -118,6 +125,12 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       const signedOut = readSignedOut(message)
       if (signedOut !== undefined) {
         signOutWaiters.get(signedOut.account)?.(signedOut.ok)
+        return
+      }
+      const reportedAccounts = readAccounts(message)
+      if (reportedAccounts !== undefined) {
+        accounts = reportedAccounts
+        onAccounts()
         return
       }
       const reported = readEditors(message)
@@ -172,6 +185,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     },
     isStopped: () => state.kind === "stopped",
     state: () => state,
+    accounts: () => accounts,
   }
 }
 
@@ -230,4 +244,13 @@ function readSignedOut(message: unknown): { account: SignOutAccount; ok: boolean
   const { account, ok } = message
   if ((account !== "prismic" && account !== "chatgpt") || typeof ok !== "boolean") return undefined
   return { account, ok }
+}
+
+// The daemon's account lines (src/cli.ts): who it runs as, for the menu.
+function readAccounts(message: unknown): string[] | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "accounts" || !("accounts" in message)) return undefined
+  const { accounts } = message
+  if (!Array.isArray(accounts) || !accounts.every((line) => typeof line === "string")) return undefined
+  return accounts
 }

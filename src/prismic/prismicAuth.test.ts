@@ -401,10 +401,12 @@ describe("signOut", () => {
     const auth = await newAuth({ store })
     await signIn(auth)
     const refreshToken = storedRefreshToken(store)
+    expect(auth.signedInUsers()).toHaveLength(1)
 
     await auth.signOutEverywhere()
 
     expect(auth.status(stub.origin)).toEqual({ status: "signed_out" })
+    expect(auth.signedInUsers()).toEqual([])
     expect(stub.requestsTo("/revoke").map((request) => new URLSearchParams(request.body).get("token"))).toEqual([refreshToken])
   })
 

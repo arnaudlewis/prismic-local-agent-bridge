@@ -6,6 +6,7 @@ import type { AgentCredentials, AgentProvider } from "../provider.ts"
 import type { AgentRuntime } from "../agentRuntime.ts"
 import type { ApiKeyVault } from "../../secrets/apiKeyVault.ts"
 import { blockedCommands, commandNameCandidates, hiddenCommands, nativeCommandName } from "./commands.ts"
+import { describeClaudeCodeLogin } from "./claudeCodeLogin.ts"
 import { ensureIsolatedClaudeHome, isolatedClaudeHomePath, resolveClaudeAcpBin } from "./claudeConfig.ts"
 import { createKeyRoutes } from "./keyRoutes.ts"
 import { validateKeyWithAnthropic } from "./keyValidation.ts"
@@ -136,6 +137,12 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
           ...(status.error === undefined ? {} : { error: status.error }),
         },
       }
+    },
+
+    async accountSummary() {
+      if (useClaudeCodeLogin) return describeClaudeCodeLogin({ binaryPath: runtime?.binaryPath() })
+      const status = await vault.status()
+      return status.configured ? `Claude: API key ${status.keyHint ?? "configured"}` : "Claude: no API key yet"
     },
 
     async bannerLines() {
