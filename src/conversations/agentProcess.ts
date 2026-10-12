@@ -245,6 +245,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     pendingPermissions: new Map(),
     toolIdentities: new Map(),
   }
+  const startedAt = Date.now()
 
   try {
     const initialized = await connection.initialize({
@@ -252,6 +253,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
       clientInfo: { name: "prismic-local-agent", title: "Prismic Local Agent", version: bridgeInfo.version },
     })
+    const initializedAt = Date.now()
     if (conversation.generation !== generation) throw new StartAbortedError()
     if (isStale()) throw new StaleCredentialsError()
     if (initialized.agentCapabilities?.mcpCapabilities?.http !== true) {
@@ -297,6 +299,9 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       await applyInitialConfig(provider.initialConfig?.() ?? {}, agent)
     }
     agent.preambleSent = resumed
+    console.info(
+      `[agent/start] agent=${provider.id} initializeMs=${initializedAt - startedAt} sessionMs=${Date.now() - initializedAt} resumed=${resumed}`,
+    )
 
     if (conversation.generation !== generation) throw new StartAbortedError()
     if (isStale()) throw new StaleCredentialsError()

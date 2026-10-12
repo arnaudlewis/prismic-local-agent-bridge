@@ -90,8 +90,12 @@ export async function handleChatPrompt(
       }
     }
     agent.promptInFlight = true
+    const promptSentAt = Date.now()
     const response = await agent.connection.prompt({ sessionId: agent.sessionId, prompt })
     if (conversation.process === agent) emit(ctx, conversation, { type: "turn_end", stopReason: response.stopReason })
+    console.info(
+      `[turn] agent=${provider.id} stop=${response.stopReason} contextMs=${promptSentAt - agent.turnStartedAt} totalMs=${Date.now() - agent.turnStartedAt}`,
+    )
   } catch (error) {
     if (conversation.process === agent) {
       flushHeldText(ctx, conversation)
