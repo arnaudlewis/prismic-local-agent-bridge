@@ -108,6 +108,8 @@ When the agent's MCP tool call `get_editor_context` of the `prismic` server comp
 
 This reads the tool output that codex-acp 2.1.1 reports itself: an MCP call is a `tool_call` titled `mcp.<server>.<tool>` with `rawInput: { server, tool, arguments }`, and its completed `tool_call_update` carries `rawOutput: { result: { content: [{ type: "text", text }], structuredContent }, error }`. codex-acp leaves unchanged fields (title, `rawInput`) out of updates, so the bridge remembers the tool identity from the start report. The bridge makes no MCP call of its own.
 
+Every regular (non-slash) prompt also gets a one-line reminder, "Reminder: call get_editor_context first for any question about the current page, slice or field.", as an extra content block after the user's text, so the agent re-reads the editor context (the user may have selected another slice or field) even in long conversations and resumed sessions. It is never recorded in the transcript, and slash commands don't get it. The preamble itself also tells the agent to call `get_editor_context` at the start of every message about the page, a slice or a field.
+
 The first prompt of a conversation is preceded by a preamble that also holds an answer style guide and tells the agent not to print a "Context:" line (the UI already shows it). The title, id and repository it interpolates are collapsed to one line, capped at 200 characters, and stripped of double quotes.
 
 ## Threat model

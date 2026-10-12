@@ -106,7 +106,8 @@ function misbehave(): void {
 
 function handlePrompt(message: Message): void {
   const blocks = message.params?.prompt ?? []
-  const text = blocks.at(-1)?.text ?? ""
+  // The bridge appends a one-line reminder after the user's text on regular prompts; the user's text is the block before it.
+  const text = blocks.filter((block) => !block.text.startsWith("Reminder: call get_editor_context")).at(-1)?.text ?? ""
   if (text.includes("flood-permissions")) {
     heldPromptId = message.id
     for (let index = 0; index < 25; index++) {

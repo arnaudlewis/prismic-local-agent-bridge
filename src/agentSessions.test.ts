@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   buildPreamble,
+  contextReminder,
   createAgentSessions,
   isSlashCommand,
   parseSlashCommand,
@@ -1001,6 +1002,15 @@ describe("buildPreamble", () => {
     expect(preamble).toContain("don't repeat it")
   })
 
+  it("tells the agent to call get_editor_context at the start of every relevant message", () => {
+    for (const preamble of [buildPreamble(base), buildPreamble({ ...base, document: undefined })]) {
+      expect(preamble).toContain("At the start of EVERY user message")
+      expect(preamble).toContain("follow-ups included")
+      expect(preamble).toContain("call get_editor_context first, even if you already did earlier in this conversation")
+      expect(preamble).toContain("Never answer about the current slice from earlier results.")
+    }
+  })
+
   it("says no document is open when there is none", () => {
     const preamble = buildPreamble({ ...base, document: undefined })
 
@@ -1374,5 +1384,94 @@ describe("in-flight config change across chat_reset", () => {
     expect(notices(harness.events)).toEqual([])
     await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "hi", session })
     expect(harness.lastMode()?.currentValue).toBe("read-only")
+  })
+})
+
+describe("context reminder", () => {
+  function blocks(events: BridgeEvent[]): string[] {
+    return events.flatMap((event) =>
+      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
+    )
+  }
+
+  async function open() {
+    const harness = createHarness()
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    return harness
+  }
+
+  async function sendPrompt(harness: Harness, text: string) {
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowId, { type: "chat_prompt", text, session })
+    return blocks(harness.events)
+  }
+
+  it("is the one-line reminder text", () => {
+    expect(contextReminder).toBe(
+      "Reminder: call get_editor_context first for any question about the current page, slice or field.",
+    )
+  })
+
+  it("is appended after the user's text on every regular prompt, with the preamble before it on the first", async () => {
+    const harness = await open()
+
+    const first = await sendPrompt(harness, "what is in this slice?")
+    expect(first).toHaveLength(3)
+    expect(first[0]).toContain("You are running inside")
+    expect(first[1]).toBe("what is in this slice?")
+    expect(first[2]).toBe(contextReminder)
+
+    const second = await sendPrompt(harness, "and now?")
+    expect(second).toEqual(["and now?", contextReminder])
+  })
+
+  it("is also appended to $skill prompts", async () => {
+    const harness = await open()
+
+    expect(await sendPrompt(harness, "$skill do it")).toEqual([
+      expect.stringContaining("You are running inside"),
+      "$skill do it",
+      contextReminder,
+    ])
+  })
+
+  it("is absent on slash commands, which stay a single first block", async () => {
+    const harness = await open()
+
+    expect(await sendPrompt(harness, "/status")).toEqual(["/status"])
+    expect(await sendPrompt(harness, "/ status")).toEqual(["/ status"])
+    expect(await sendPrompt(harness, "/mcp")).toEqual(["/mcp"])
+  })
+
+  it("is still sent after a resumed session, which already had the preamble", async () => {
+    const harness = await open()
+    await sendPrompt(harness, "first")
+    harness.agents.detachWindow(windowId)
+
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowB, { type: "chat_open", session })
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowB, { type: "chat_prompt", text: "second", session })
+
+    expect(blocks(harness.events)).toEqual(["second", contextReminder])
+  })
+
+  it("is not recorded: the transcript and the replayed history only hold the user's text", async () => {
+    const harness = await open()
+    await sendPrompt(harness, "what is in this slice?")
+
+    await harness.agents.handleMessage(windowB, { type: "chat_open", session })
+
+    const history = chatHistory(harness.eventsFor(windowB))
+    expect(history.filter((event) => event.type === "user_message")).toEqual([
+      { type: "user_message", text: "what is in this slice?" },
+    ])
+    // The fake agent echoes every block it receives as agent text, so only the user's own messages are checked.
+    const file = join(harness.dataDir, "conversations", `${conversationId}.json`)
+    await vi.waitFor(() => expect(existsSync(file)).toBe(true))
+    const stored = JSON.parse(readFileSync(file, "utf8")) as { events: Array<{ type: string; text?: string }> }
+    expect(stored.events.filter((event) => event.type === "user_message")).toEqual([
+      { type: "user_message", text: "what is in this slice?" },
+    ])
   })
 })
