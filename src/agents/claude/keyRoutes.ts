@@ -46,13 +46,15 @@ export function createKeyRoutes(args: KeyRoutesArgs): ProviderRoute[] {
         if (!isJsonContentType(req.headers["content-type"])) {
           throw new HttpError(415, "unsupported_media_type")
         }
+        if (vault.storage() === "env") throw new HttpError(409, "managed_by_environment")
+
+        // Admitted before the first await, so before the body is read: a DELETE (or a newer PUT) that completes while
+        // this request is still streaming its body, or while Anthropic is being asked, wins.
+        const epoch = vault.beginMutation()
         const body = KeyBodySchema.safeParse(await readJsonBody(req, maxBodyBytes))
         if (!body.success || !apiKeyFormat.test(body.data.key)) throw new HttpError(400, "invalid_format")
         const { key } = body.data
-        if (vault.storage() === "env") throw new HttpError(409, "managed_by_environment")
-
-        // Admitted: from here on a DELETE (or another PUT) that arrives while Anthropic is being asked wins.
-        const epoch = vault.beginMutation()
+        if (!vault.isCurrentMutation(epoch)) throw new HttpError(409, "superseded")
         const validation = await validate(key)
         if (validation === "invalid") throw new HttpError(400, "invalid_key")
         if (validation === "unavailable") throw new HttpError(502, "validation_unavailable")

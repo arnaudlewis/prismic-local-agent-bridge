@@ -9,7 +9,7 @@ import { createApiKeyVault } from "../secrets/apiKeyVault.ts"
 import { createMemorySecretStore } from "../testing/memorySecretStore.ts"
 import { conversationId, createHarness, fakeAgentBin, liveAgentText, windowId } from "../testing/harness.ts"
 import type { Session } from "../protocol.ts"
-import { baseEnvNames, buildChildEnvironment, passEnvNamePattern } from "./childEnv.ts"
+import { baseEnvNames, buildChildEnvironment, passEnvNamePattern, withheldProxyNames } from "./childEnv.ts"
 
 const secret = "never-printed-value"
 
@@ -87,6 +87,64 @@ describe("buildChildEnvironment", () => {
     })
   })
 
+  describe("proxy variables", () => {
+    it.each([
+      ["HTTP_PROXY"],
+      ["HTTPS_PROXY"],
+      ["ALL_PROXY"],
+      ["http_proxy"],
+      ["https_proxy"],
+      ["all_proxy"],
+      ["Https_Proxy"],
+      ["hTTp_pRoxy"],
+    ])("passes %s when it has no credentials", (name) => {
+      expect(build({ [name]: "http://proxy.example:3128" })).toEqual({ [name]: "http://proxy.example:3128" })
+      expect(build({ [name]: "proxy.example:3128" })).toEqual({ [name]: "proxy.example:3128" })
+    })
+
+    it.each([
+      ["HTTP_PROXY", "http://user:pass@proxy.example:3128"],
+      ["HTTPS_PROXY", "https://user:pass@proxy.example:3128/"],
+      ["ALL_PROXY", "socks5://user:pass@proxy.example:1080"],
+      ["http_proxy", "http://user:pass@proxy.example:3128"],
+      ["https_proxy", "http://user@proxy.example:3128"],
+      ["all_proxy", "user:pass@proxy.example:3128"],
+      ["Https_Proxy", "http://user:p%40ss@proxy.example:3128"],
+      ["HTTPS_PROXY", "http://:onlypass@proxy.example:3128"],
+      ["HTTPS_PROXY", "http://proxy.example\\@evil.example:3128"],
+    ])("drops %s when its value has credentials (%s)", (name, value) => {
+      expect(build({ [name]: value, PATH: "/bin" })).toEqual({ PATH: "/bin" })
+    })
+
+    it("drops only the variables that have credentials, among a mix of forms", () => {
+      const env = build({
+        HTTP_PROXY: "http://user:pass@proxy.example:3128",
+        https_proxy: "http://proxy.example:3128",
+        ALL_PROXY: "http://proxy.example:3128",
+        all_proxy: "http://user:pass@proxy.example:3128",
+        NO_PROXY: "localhost",
+      })
+
+      expect(Object.keys(env).sort()).toEqual(["ALL_PROXY", "NO_PROXY", "https_proxy"])
+    })
+
+    it("passes one that has credentials only when the user names it, whatever its case", () => {
+      const source = { HTTPS_PROXY: "http://u:p@proxy:1", https_proxy: "http://u:p@proxy:2", HTTP_PROXY: "http://u:p@proxy:3" }
+
+      expect(Object.keys(build(source, { passEnv: ["HTTPS_PROXY"] })).sort()).toEqual(["HTTPS_PROXY", "https_proxy"])
+    })
+
+    it("names the withheld variables, upper-cased and once, never their values", () => {
+      const names = withheldProxyNames({
+        source: { HTTPS_PROXY: "http://u:secretpw@p:1", https_proxy: "http://u:secretpw@p:1", ALL_PROXY: "http://p:1", HTTP_PROXY: "http://u:p@p:1" },
+        passEnv: ["HTTP_PROXY"],
+      })
+
+      expect(names).toEqual(["HTTPS_PROXY"])
+      expect(JSON.stringify(names)).not.toContain("secretpw")
+    })
+  })
+
   describe("--pass-env names", () => {
     it.each(["GITHUB_TOKEN", "_X", "A1_B2", "AWS_PROFILE"])("accepts %s", (name) => {
       expect(passEnvNamePattern.test(name)).toBe(true)
@@ -146,10 +204,11 @@ async function childEnvironmentNames(args: {
   agent: "codex" | "claude"
   passEnv?: string[]
   userHome?: string
+  extraEnv?: Record<string, string>
 }): Promise<string[]> {
   const dataDir = mkdtempSync(join(tmpdir(), "bridge-spawn-env-"))
   const saved = process.env
-  process.env = { ...legitimate, ...pollution } as NodeJS.ProcessEnv
+  process.env = { ...legitimate, ...pollution, ...args.extraEnv } as NodeJS.ProcessEnv
   try {
     const provider =
       args.agent === "codex"
@@ -233,6 +292,28 @@ describe("the complete environment of an agent child", () => {
       expect(names).not.toContain("AWS_SECRET_ACCESS_KEY")
       expect(names).not.toContain("OPENAI_API_KEY")
     }
+  })
+
+  describe("a proxy with credentials", () => {
+    const credentialed = { HTTPS_PROXY: "http://user:proxy-pw@proxy.example:3128", http_proxy: "http://user:proxy-pw@proxy.example:3128", All_Proxy: "http://user:pw@p:1" }
+
+    it.each(["codex", "claude"] as const)("is not passed to %s, while the credential-free ones still are", async (agent) => {
+      const names = await childEnvironmentNames({ agent, extraEnv: { ...credentialed, ALL_PROXY: "http://proxy.example:3128", Https_Proxy: "http://proxy.example:3128" } })
+
+      expect(names).not.toContain("HTTPS_PROXY")
+      expect(names).not.toContain("http_proxy")
+      expect(names).not.toContain("All_Proxy")
+      expect(names).toContain("ALL_PROXY")
+      expect(names).toContain("Https_Proxy")
+    })
+
+    it.each(["codex", "claude"] as const)("is passed to %s when the user names it", async (agent) => {
+      const names = await childEnvironmentNames({ agent, passEnv: ["HTTPS_PROXY"], extraEnv: credentialed })
+
+      expect(names).toContain("HTTPS_PROXY")
+      expect(names).not.toContain("http_proxy")
+      expect(names).not.toContain("All_Proxy")
+    })
   })
 
   it("gives the Claude child the vault's key, not the daemon's own ANTHROPIC_API_KEY", async () => {

@@ -15,7 +15,7 @@ import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
 import { createApiKeyVault, createDefaultSecretStores } from "./secrets/apiKeyVault.ts"
-import { passEnvNamePattern } from "./conversations/childEnv.ts"
+import { passEnvNamePattern, withheldProxyNames } from "./conversations/childEnv.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
@@ -82,6 +82,10 @@ async function main(): Promise<void> {
   console.info(`Allowed origins: ${options.origins.join(", ")}`)
   for (const provider of providers) {
     for (const line of await provider.bannerLines()) console.info(line)
+  }
+  const withheld = withheldProxyNames({ source: process.env, passEnv: options.passEnv })
+  if (withheld.length > 0) {
+    console.info(`Proxy credentials not passed to agents: ${withheld.join(", ")} (use --pass-env ${withheld.join(" --pass-env ")} to allow)`)
   }
   if (options.passEnv.length > 0) console.info(`Passing to the agents (--pass-env): ${options.passEnv.join(", ")}`)
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)

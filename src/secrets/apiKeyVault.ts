@@ -25,6 +25,8 @@ export interface ApiKeyVault {
   // Admits a mutation (a PUT): bumps the mutation epoch and returns it. Any earlier mutation still waiting on
   // something slow (Anthropic's answer) is superseded.
   beginMutation(): number
+  // Whether no other mutation was admitted since `epoch` was returned.
+  isCurrentMutation(epoch: number): boolean
   // Stores the key only if no other mutation (a DELETE, another PUT) was admitted since `epoch` was returned.
   // Resolves false, storing nothing, when superseded.
   setIfCurrent(key: string, epoch: number): Promise<boolean>
@@ -133,6 +135,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
 
   return {
     get,
+    isCurrentMutation: (epoch) => epoch === mutationEpoch,
     knownKeys: () => [...seenKeys],
     credentialEpoch: () => credentialEpoch,
     beginMutation: () => (mutationEpoch += 1),

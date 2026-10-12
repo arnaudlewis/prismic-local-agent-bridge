@@ -390,6 +390,37 @@ describe("GET /status for claude", () => {
   })
 })
 
+// A PUT whose body is still on its way: the request has been received (the handler is running) and waits for the rest.
+async function startSlowPut(s: Setup, body: unknown): Promise<{ finish(): Promise<Reply> }> {
+  const payload = JSON.stringify(body)
+  const cut = Math.floor(payload.length / 2)
+  const request = httpRequest({
+    host: "127.0.0.1",
+    port: s.port,
+    path: "/auth/claude/key",
+    method: "PUT",
+    headers: { Authorization: `Bearer ${s.token}`, Origin: origin, "Content-Type": "application/json" },
+  })
+  const reply = new Promise<Reply>((resolve, reject) => {
+    request.on("response", (response) => {
+      const chunks: Buffer[] = []
+      response.on("data", (chunk: Buffer) => chunks.push(chunk))
+      response.on("end", () => resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8"), headers: response.headers }))
+    })
+    request.on("error", reject)
+  })
+  request.write(payload.slice(0, cut))
+  // Long enough for the server to have received the headers and be waiting for the rest.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  return {
+    finish() {
+      request.end(payload.slice(cut))
+      return reply
+    },
+  }
+}
+
+
 describe("credential mutations that overlap", () => {
   const first = "sk-ant-api03-FIRSTFIRSTFIRSTFIRSTFIRST1111"
   const second = "sk-ant-api03-SECONDSECONDSECONDSECOND2222"
@@ -417,6 +448,53 @@ describe("credential mutations that overlap", () => {
     expect(JSON.parse(reply.body)).toEqual({ error: "superseded" })
     expect(s.store.value()).toBeUndefined()
     expect(await status(s)).toMatchObject({ account: { status: "missing" } })
+  })
+
+  describe("while a PUT is still streaming its body", () => {
+    it("is superseded by a DELETE that completes first: nothing is stored, and Anthropic is never asked", async () => {
+      const s = await setup({ stored: "sk-ant-api03-OLDOLDOLDOLDOLDOLDOLDOLD0000" })
+      const slow = await startSlowPut(s, { key })
+
+      expect((await send(s, "DELETE")).status).toBe(204)
+      const reply = await slow.finish()
+
+      expect(reply.status).toBe(409)
+      expect(JSON.parse(reply.body)).toEqual({ error: "superseded" })
+      expect(s.validated).toEqual([])
+      expect(s.store.value()).toBeUndefined()
+      expect(await status(s)).toMatchObject({ account: { status: "missing" } })
+    })
+
+    it("is superseded by a newer PUT that completes first: the newer key stays", async () => {
+      const s = await setup()
+      const slow = await startSlowPut(s, { key: first })
+
+      expect((await put(s, { key: second })).status).toBe(204)
+      const reply = await slow.finish()
+
+      expect(reply.status).toBe(409)
+      expect(JSON.parse(reply.body)).toEqual({ error: "superseded" })
+      expect(s.validated).toEqual([second])
+      expect(s.store.value()).toBe(second)
+    })
+
+    it("still stores the key when nothing else happened in the meantime", async () => {
+      const s = await setup()
+      const slow = await startSlowPut(s, { key })
+
+      expect((await slow.finish()).status).toBe(204)
+
+      expect(s.store.value()).toBe(key)
+    })
+
+    it("does not let a request that is refused before its body (wrong media type, rate limit) supersede anything", async () => {
+      const s = await setup()
+      const slow = await startSlowPut(s, { key })
+
+      expect((await send(s, "PUT", { body: "x", contentType: "text/plain" })).status).toBe(415)
+
+      expect((await slow.finish()).status).toBe(204)
+    })
   })
 
   it("lets the last PUT win: the earlier one that answers later is superseded", async () => {
