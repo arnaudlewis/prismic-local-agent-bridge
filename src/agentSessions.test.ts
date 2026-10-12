@@ -4,19 +4,51 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { buildPreamble, createAgentSessions, isSlashCommand, toBridgeCommand } from "./agentSessions.ts"
+import {
+  buildPreamble,
+  createAgentSessions,
+  isSlashCommand,
+  parseSlashCommand,
+  toBridgeCommand,
+} from "./agentSessions.ts"
 import type { AgentSessions } from "./agentSessions.ts"
 import { ClientMessageSchema } from "./protocol.ts"
 import type { BridgeConfigOption, BridgeEvent, HistoryEvent, Session } from "./protocol.ts"
 import type { WindowChannels } from "./windowChannels.ts"
 
 describe("isSlashCommand", () => {
-  it.each(["/status", "  /review check the diff", "/review-branch main", "/compact\n"])("detects %j", (text) => {
+  it.each([
+    "/status",
+    "  /review check the diff",
+    "/review-branch main",
+    "/compact\n",
+    "/ status",
+    "/\u00a0status",
+    "\u00a0/status",
+    "// ",
+    "/etc/hosts",
+  ])("detects %j like codex-acp does", (text) => {
     expect(isSlashCommand(text)).toBe(true)
   })
 
-  it.each(["status", "what does /status do", "/etc/hosts", "/$skill", "//", "/"])("ignores %j", (text) => {
-    expect(isSlashCommand(text)).toBe(false)
+  it.each(["status", "what does /status do", "/$skill", "/ $skill", "/", "/  ", "/\n", " ", ""])(
+    "ignores %j",
+    (text) => {
+      expect(isSlashCommand(text)).toBe(false)
+    },
+  )
+
+  it.each([
+    ["/logout", "logout"],
+    ["/ logout", "logout"],
+    ["/\tGOAL now", "goal"],
+    ["/\u00a0review", "review"],
+    ["\ufeff/Logout", "logout"],
+    ["/\u2028goal", "goal"],
+    ["//logout", "/logout"],
+    ["/a b c", "a"],
+  ])("parses %j as command %j", (text, name) => {
+    expect(parseSlashCommand(text)).toBe(name)
   })
 })
 
@@ -1236,5 +1268,111 @@ describe("input bounds", () => {
     expect(ClientMessageSchema.safeParse({ type: "set_config_option", configId: "c".repeat(201), value: "v" }).success).toBe(false)
     expect(ClientMessageSchema.safeParse({ type: "permission_response", requestId: "r".repeat(201) }).success).toBe(false)
     expect(ClientMessageSchema.safeParse({ type: "permission_response", requestId: "r", optionId: "o".repeat(201) }).success).toBe(false)
+  })
+})
+
+describe("blocked command canonicalization", () => {
+  function promptedTexts(events: BridgeEvent[]): string[] {
+    return events.flatMap((event) =>
+      event.type === "agent_message_chunk" && event.text.startsWith("prompt:") ? [event.text.slice(7)] : [],
+    )
+  }
+
+  async function send(text: string) {
+    const harness = createHarness()
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowId, { type: "chat_prompt", text, session })
+    return harness
+  }
+
+  it.each([
+    ["/ logout", "logout"],
+    ["/\tgoal", "goal"],
+    ["/\u00a0review", "review"],
+    ["/\n review-branch", "review-branch"],
+    ["/  LOGOUT", "logout"],
+    [" /logout", "logout"],
+    ["\u00a0/logout", "logout"],
+    ["\ufeff/goal do something", "goal"],
+    ["/\u2003review-commit abc", "review-commit"],
+    ["/\u2028goal", "goal"],
+    ["\n\n  /\t Review  ", "review"],
+    ["/LoGoUt", "logout"],
+  ])("rejects the bypass attempt %j without forwarding it", async (text, name) => {
+    const harness = await send(text)
+
+    expect(promptedTexts(harness.events)).toEqual([])
+    expect(notices(harness.events)).toEqual([`The /${name} command isn't available in the local agent.`])
+    expect(harness.events.at(-1)).toEqual({ type: "chat_status", status: "idle" })
+  })
+
+  it.each(["/status", "/ status", "/reviewer", "$skill", "//logout", "/logout2", "/etc/hosts", "please /logout"])(
+    "still forwards %j",
+    async (text) => {
+      const harness = await send(text)
+
+      expect(notices(harness.events)).toEqual([])
+      expect(promptedTexts(harness.events)).toContain(text)
+    },
+  )
+
+  it("sends a slash command as the first block, without the preamble", async () => {
+    const harness = await send("/ status")
+
+    expect(promptedTexts(harness.events)).toEqual(["/ status"])
+  })
+})
+
+describe("in-flight config change across chat_reset", () => {
+  it("discards a mode change whose answer arrives after chat_reset", async () => {
+    process.env.FAKE_AGENT_SLOW_CONFIG_MS = "300"
+    try {
+      const harness = createHarness()
+      await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+      const change = harness.agents.handleMessage(windowId, {
+        type: "set_config_option",
+        configId: "mode",
+        value: "agent-full-access",
+      })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+
+      await harness.agents.handleMessage(windowId, { type: "chat_reset" })
+      const sentAtReset = harness.events.length
+      await change
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      // Neither a session_config nor a notice from the stale answer.
+      expect(harness.events.slice(sentAtReset)).toEqual([])
+    } finally {
+      delete process.env.FAKE_AGENT_SLOW_CONFIG_MS
+    }
+  })
+
+  it("starts the next chat in the default mode, with nothing carried over", async () => {
+    process.env.FAKE_AGENT_SLOW_CONFIG_MS = "300"
+    const harness = createHarness()
+    try {
+      await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+      const change = harness.agents.handleMessage(windowId, {
+        type: "set_config_option",
+        configId: "mode",
+        value: "agent-full-access",
+      })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await harness.agents.handleMessage(windowId, { type: "chat_reset" })
+      await change
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    } finally {
+      delete process.env.FAKE_AGENT_SLOW_CONFIG_MS
+    }
+
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
+
+    expect(harness.lastMode()?.currentValue).toBe("read-only")
+    expect(notices(harness.events)).toEqual([])
+    await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "hi", session })
+    expect(harness.lastMode()?.currentValue).toBe("read-only")
   })
 })

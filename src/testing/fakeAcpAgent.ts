@@ -208,6 +208,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       if (message.params?.configId === "collaboration_mode" && message.params.value !== undefined) {
         collaborationMode = message.params.value
       }
+      if (process.env.FAKE_AGENT_SLOW_CONFIG_MS !== undefined) {
+        // Answers late and survives SIGTERM, like an agent whose RPC is still in flight when the bridge resets.
+        process.on("SIGTERM", () => {})
+        setTimeout(() => {
+          respond(message.id, { configOptions: configOptions() })
+          setTimeout(() => process.exit(0), 200)
+        }, Number(process.env.FAKE_AGENT_SLOW_CONFIG_MS))
+        break
+      }
       respond(message.id, { configOptions: configOptions() })
       break
     case "session/prompt":

@@ -502,15 +502,20 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       return
     }
     const { configId, value } = message
+    // A reset or restart during the RPC makes its answer stale: it must not leak into the next chat.
+    const generation = conversation.generation
+    const isStale = () => conversation.generation !== generation || conversation.agent !== agent
     try {
       const response = await agent.connection.setSessionConfigOption({
         sessionId: agent.sessionId,
         configId,
         value,
       })
+      if (isStale()) return
       conversation.selectedConfig[configId] = value
       agent.configOptions = response.configOptions
     } catch (error) {
+      if (isStale()) return
       const optionName = agent.configOptions.find((option) => option.id === configId)?.name ?? configId
       notify(conversation, "error", `Couldn't change ${optionName}: ${errorMessage(error)}`)
     }
@@ -587,6 +592,8 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
   }
 
   async function doEnsureAgent(conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
+    // Everything below awaits something; a reset in the meantime must not leave notices or an agent behind.
+    const entryGeneration = conversation.generation
     let accessToken: string
     let expiresAt: number
     try {
@@ -594,11 +601,13 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       accessToken = token.accessToken
       expiresAt = token.expiresAt
     } catch (error) {
+      if (conversation.generation !== entryGeneration) return abandonEnsure(conversation)
       const text = error instanceof ChatGptAuthError ? authErrorNotices[error.code] : `Agent error: ${errorMessage(error)}`
       notify(conversation, "error", text)
       setStatus(conversation, "idle")
       return false
     }
+    if (conversation.generation !== entryGeneration) return abandonEnsure(conversation)
 
     const startedWith: StartedWith = {
       chatgptExpiresAt: expiresAt,
@@ -612,7 +621,9 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     }
 
     const stopped = stopAgent(conversation)
+    const stopGeneration = conversation.generation
     if (stopped !== undefined) await waitForExit(stopped)
+    if (conversation.generation !== stopGeneration) return abandonEnsure(conversation)
 
     if (!makeRoomForAgent(conversation)) {
       notify(conversation, "error", tooManyConversationsNotice)
@@ -626,13 +637,20 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       await startAgent({ conversation, windowId, session, accessToken, startedWith })
       return true
     } catch (error) {
-      if (error instanceof StartAbortedError) return false
+      if (error instanceof StartAbortedError || conversation.generation !== stopGeneration) {
+        return abandonEnsure(conversation)
+      }
       notify(conversation, "error", `Couldn't start the local agent: ${errorMessage(error)}`)
       setStatus(conversation, "idle")
       return false
     } finally {
       conversation.starting = false
     }
+  }
+
+  function abandonEnsure(conversation: Conversation): false {
+    setStatus(conversation, "idle")
+    return false
   }
 
   async function startAgent(startArgs: StartAgentArgs): Promise<void> {
@@ -730,6 +748,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
             agent.replaying = false
           }
         }
+        if (conversation.generation !== generation) throw new StartAbortedError()
         if (!resumed) {
           notify(
             conversation,
@@ -754,6 +773,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       }
 
       await applySelectedConfig(conversation, agent)
+      if (conversation.agent !== agent) throw new StartAbortedError()
       sendAgentState(conversation, agent)
     } catch (error) {
       child.kill("SIGTERM")
@@ -766,6 +786,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
       ([a], [b]) => Number(b === "model") - Number(a === "model"),
     )
     for (const [configId, value] of entries) {
+      if (conversation.agent !== agent) return
       if (!offersValue(agent.configOptions, configId, value)) continue
       try {
         const response = await agent.connection.setSessionConfigOption({
@@ -773,6 +794,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
           configId,
           value,
         })
+        if (conversation.agent !== agent) return
         agent.configOptions = response.configOptions
       } catch (error) {
         console.warn(`Could not restore ${configId}: ${errorMessage(error)}`)
@@ -986,8 +1008,23 @@ export function toBridgeCommand(command: AvailableCommand): BridgeCommand {
   return { name: command.name, description: command.description, ...(hint === undefined ? {} : { hint }) }
 }
 
+// Mirrors codex-acp 2.1.1 CodexCommands.parseCommand on the first text block, step for step: trim, require a leading
+// "/", trim again, split the first token on whitespace, lowercase it. Any difference is a way around the blocklist
+// ("/ logout", "/\u00a0review", " /goal"), so keep this identical, whitespace definition included.
+export function parseSlashCommand(text: string): string | undefined {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith("/")) return undefined
+  const commandText = trimmed.slice(1).trim()
+  if (commandText.length === 0) return undefined
+  const [name] = commandText.split(/\s+/)
+  if (!name) return undefined
+  return name.toLowerCase()
+}
+
+// codex-acp leaves "$skill" to the model, so that is the only slash form that still gets the preamble.
 export function isSlashCommand(text: string): boolean {
-  return /^\/[A-Za-z][\w-]*(\s|$)/.test(text.trim())
+  const name = parseSlashCommand(text)
+  return name !== undefined && !name.startsWith("$")
 }
 
 // Account-global commands, or ones that start turns outside the bridge's sandbox and approval policy.
@@ -998,7 +1035,7 @@ const blockedCommands = ["logout", "review", "review-branch", "review-commit", "
 const hiddenCommands = ["plan"]
 
 function blockedCommandName(text: string): string | undefined {
-  const name = /^\/([A-Za-z][\w-]*)(\s|$)/.exec(text.trim())?.[1]?.toLowerCase()
+  const name = parseSlashCommand(text)
   return name !== undefined && blockedCommands.includes(name) ? name : undefined
 }
 
