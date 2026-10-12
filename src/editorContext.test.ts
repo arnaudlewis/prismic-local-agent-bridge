@@ -75,4 +75,14 @@ describe("buildEditorContextBlock", () => {
       focusedSlice: { name: "Hero", paths: ["a", "b"] },
     })
   })
+
+  it("tells the agent to fetch the whole page content when no slice is focused, and only then", () => {
+    const payloadOf = (document: object) =>
+      JSON.parse(
+        (buildEditorContextBlock({ status: "no_pin", detected: { document } }, undefined) ?? "").slice(header.length + 1),
+      ) as { note?: string }
+
+    expect(payloadOf({ id: "DOC1", title: "Home" }).note).toMatch(/includeDocumentContent: true/)
+    expect(payloadOf({ id: "DOC1", title: "Home", focusedSlice: { name: "Hero", paths: ["a"] } }).note).toBeUndefined()
+  })
 })

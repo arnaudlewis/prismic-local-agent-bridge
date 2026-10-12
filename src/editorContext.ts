@@ -108,6 +108,9 @@ export function summarizeEditorContext(result: unknown): EditorContextSummary | 
   return summary
 }
 
+const noSliceFocusedNote =
+  "No slice is focused, so this block has no field paths. Before editing, call get_editor_context with includeDocumentContent: true (and pinnedDocumentId) to get the whole page content and every field path."
+
 // A compact, fixed-shape view of the tool result for the model: no draft content, no slice item, no other windows.
 export function buildEditorContextBlock(result: unknown, pinnedDocumentId: string | undefined): string | undefined {
   const parsed = EditorContextResultSchema.safeParse(result)
@@ -150,6 +153,8 @@ export function buildEditorContextBlock(result: unknown, pinnedDocumentId: strin
       ? {}
       : { focusedField: { label: singleLine(field.label), ...(field.type === undefined ? {} : { type: field.type }) } }),
     ...(shown !== undefined && shown.id !== document?.id ? { detected: { id: shown.id, title: singleLine(shown.title ?? "") } } : {}),
+    // The block holds no field paths without a focused slice, and the model would guess them or give up.
+    ...(document !== undefined && slice === undefined ? { note: noSliceFocusedNote } : {}),
   }
 
   return fitBlock(payload)
