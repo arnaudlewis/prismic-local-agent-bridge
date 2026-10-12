@@ -28,6 +28,8 @@ export type SignOutAccount = "prismic" | "chatgpt"
 
 export interface BridgeProcess {
   signOut(account: SignOutAccount): Promise<boolean>
+  // Asks the daemon for the ChatGPT authorization URL, to open in the browser.
+  signIn(): Promise<string | undefined>
   start(): void
   stop(): Promise<void>
   restart(): Promise<void>
@@ -46,6 +48,7 @@ const healthIntervalMs = 500
 const maxHealthBytes = 1024
 // The daemon may wait for two 15 s network deadlines (discovery, revocation) before it answers.
 const signOutTimeoutMs = 45_000
+const signInUrlTimeoutMs = 10_000
 const healthTimeoutMs = 1000
 const portRetryMs = 30_000
 const stableAfterMs = 60_000
@@ -62,6 +65,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
   let crashes = 0
   const signOutWaiters = new Map<SignOutAccount, (ok: boolean) => void>()
   const signOutsInFlight = new Map<SignOutAccount, Promise<boolean>>()
+  let signInWaiter: ((url: string | undefined) => void) | undefined
   // Who the daemon runs as, as lines for the menu (src/cli.ts).
   let accounts: string[] = []
 
@@ -124,6 +128,11 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     spawned.on("exit", onGone)
     spawned.on("error", () => onGone(null))
     spawned.on("message", (message) => {
+      const signInUrl = readSignInUrl(message)
+      if (signInUrl !== undefined) {
+        signInWaiter?.(signInUrl)
+        return
+      }
       const signedOut = readSignedOut(message)
       if (signedOut !== undefined) {
         signOutWaiters.get(signedOut.account)?.(signedOut.ok)
@@ -180,8 +189,26 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     return result
   }
 
+  // Asks the daemon to start the ChatGPT sign-in; resolves with the authorization URL to open, or undefined when the
+  // daemon doesn't answer in time.
+  function signInToChatGpt(): Promise<string | undefined> {
+    const running = child
+    if (running === undefined || !running.connected) return Promise.resolve(undefined)
+    const { promise, resolve } = Promise.withResolvers<string | undefined>()
+    signInWaiter = resolve
+    running.send({ type: "sign_in", account: "chatgpt" }, (error) => {
+      if (error !== null) resolve(undefined)
+    })
+    const timer = setTimeout(() => resolve(undefined), signInUrlTimeoutMs)
+    return promise.finally(() => {
+      clearTimeout(timer)
+      signInWaiter = undefined
+    })
+  }
+
   return {
     start,
+    signIn: signInToChatGpt,
     signOut,
     stop,
     async restart() {
@@ -261,4 +288,11 @@ function readAccounts(message: unknown): string[] | undefined {
   const { accounts } = message
   if (!Array.isArray(accounts) || !accounts.every((line) => typeof line === "string")) return undefined
   return accounts
+}
+
+// The daemon's answer to a sign_in request: the URL to open in the browser (src/cli.ts).
+function readSignInUrl(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) return undefined
+  if (!("type" in message) || message.type !== "sign_in_url" || !("url" in message)) return undefined
+  return typeof message.url === "string" ? message.url : undefined
 }

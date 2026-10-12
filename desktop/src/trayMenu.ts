@@ -12,6 +12,7 @@ interface CreateTrayMenuArgs {
   claudeCodeLogin: { isEnabled: () => boolean; toggle: () => void }
   // Asks the user to confirm, then signs the daemon out of that OAuth account.
   signOut: (account: SignOutAccount) => void
+  signInToChatGpt: () => void
   checkForUpdates: () => void
 }
 
@@ -26,7 +27,7 @@ function loadIcon(name: IconName): NativeImage {
 }
 
 export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
-  const { bridge, getUpdate, claudeCodeLogin, signOut, checkForUpdates } = args
+  const { bridge, getUpdate, claudeCodeLogin, signOut, signInToChatGpt, checkForUpdates } = args
   // Colored images, not template ones: a template image is tinted by the menu bar and can't be orange or green. @2x is
   // picked up automatically.
   const icons: Record<IconName, NativeImage> = {
@@ -72,6 +73,7 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
           { label: "Sign out of ChatGPT…", click: () => signOut("chatgpt") },
         ],
       },
+      { label: "Sign in with ChatGPT…", click: () => signInToChatGpt() },
     ]
     if (update !== undefined) {
       items.push({

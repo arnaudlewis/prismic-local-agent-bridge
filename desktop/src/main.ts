@@ -73,6 +73,7 @@ function run(): void {
       getUpdate: () => update,
       claudeCodeLogin: { isEnabled: () => state?.get().claudeCodeLogin === true, toggle: () => void toggleClaudeCodeLogin() },
       signOut: (account) => void confirmAndSignOut(account),
+      signInToChatGpt: () => void startChatGptSignIn(),
       checkForUpdates: () => void checkForUpdatesNow(),
     })
     bridge.start()
@@ -100,6 +101,20 @@ function run(): void {
     })
     notification.on("click", () => void shell.openExternal(found.downloadUrl))
     notification.show()
+  }
+
+  async function startChatGptSignIn(): Promise<void> {
+    const url = await bridge.signIn()
+    // The URL comes from our own daemon; only a web page is ever opened.
+    if (url !== undefined && URL.canParse(url) && new URL(url).protocol === "https:") {
+      void shell.openExternal(url)
+      return
+    }
+    await dialog.showMessageBox({
+      type: "error",
+      message: "Couldn't start the ChatGPT sign-in",
+      detail: "Check that Prismic Agent is running (the menu says so), then try again.",
+    })
   }
 
   async function confirmAndSignOut(account: SignOutAccount): Promise<void> {

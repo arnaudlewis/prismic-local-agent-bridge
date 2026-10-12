@@ -35,6 +35,8 @@ const defaultRefreshMarginMs = 300_000
 const portInUseExitCode = 3
 const accountsRefreshMs = 30_000
 const accountsMinGapMs = 5_000
+const signInPollMs = 2_000
+const signInWatchMs = 5 * 60_000
 
 // The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it. The
 // listener is registered before anything is awaited: a disconnect during startup must not leave a daemon nobody
@@ -115,6 +117,24 @@ async function main(): Promise<void> {
         if (process.connected) process.send?.({ type: "signed_out", account, ok })
         publishAccounts()
       })
+  })
+  // And starts the ChatGPT sign-in: it answers with the authorization URL, which the app opens in the browser. The
+  // callback comes back to the daemon (/auth/callback), and the accounts are published once the sign-in is over.
+  let watchingChatGptSignIn = false
+  process.on("message", (message) => {
+    if (!isChatGptSignInRequest(message)) return
+    const url = chatgptAuth.startSignIn()
+    if (process.connected) process.send?.({ type: "sign_in_url", account: "chatgpt", url })
+    if (watchingChatGptSignIn) return
+    watchingChatGptSignIn = true
+    const startedAt = Date.now()
+    const timer = setInterval(() => {
+      if (chatgptAuth.getStatus().status === "signing_in" && Date.now() - startedAt < signInWatchMs) return
+      clearInterval(timer)
+      watchingChatGptSignIn = false
+      publishAccounts()
+    }, signInPollMs)
+    timer.unref()
   })
   const upstream = createMcpUpstream({ auth: prismicAuth })
   const grants = createAgentMcpGrants()
@@ -230,6 +250,12 @@ function readSignOutRequest(message: unknown): "prismic" | "chatgpt" | undefined
   if (typeof message !== "object" || message === null) return undefined
   if (!("type" in message) || message.type !== "sign_out" || !("account" in message)) return undefined
   return message.account === "prismic" || message.account === "chatgpt" ? message.account : undefined
+}
+
+// A message of the desktop app asking to start the ChatGPT sign-in (desktop/src/bridgeProcess.ts).
+function isChatGptSignInRequest(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false
+  return "type" in message && message.type === "sign_in" && "account" in message && message.account === "chatgpt"
 }
 
 interface CliOptions {
