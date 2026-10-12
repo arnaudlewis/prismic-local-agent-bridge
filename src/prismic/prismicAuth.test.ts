@@ -521,6 +521,23 @@ describe("a sign-out voids what was started before it", () => {
 
     expect(await beginning).toBeInstanceOf(PrismicSignInRequiredError)
   })
+
+  it("also rejects a beginSignIn that was still registering when every environment was signed out", async () => {
+    const { oauth, release, held } = holdingOAuth({ hold: "register" })
+    const auth = await newAuth({ oauth })
+
+    const beginning = auth
+      .beginSignIn({ mcpOrigin: stub.origin, onSignedIn: () => {}, onFailed: () => {} })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+    await vi.waitFor(() => expect(held()).toBe(1))
+    await auth.signOutEverywhere()
+    release()
+
+    expect(await beginning).toBeInstanceOf(PrismicSignInRequiredError)
+  })
 })
 
 describe("a refresh belongs to the session that started it", () => {

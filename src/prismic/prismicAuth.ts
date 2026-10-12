@@ -108,6 +108,9 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
 
   const redirectUri = `http://127.0.0.1:${port}/oauth/prismic/callback`
   const servers = new Map<string, ServerEntry>()
+  // Every origin a sign-in was started for. A new one has no entry in `servers` until its client registration is
+  // done, and a global sign-out must void that sign-in too.
+  const signInOrigins = new Set<string>()
   const attempts = new Map<string, Attempt>()
   const refreshing = new Map<string, { generation: number; promise: Promise<string> }>()
   const registering = new Map<string, Promise<string>>()
@@ -252,6 +255,7 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
   }): Promise<string> {
     const { mcpOrigin } = signIn
     const startedSignOuts = signOutCount(mcpOrigin)
+    signInOrigins.add(mcpOrigin)
     const metadata = await discover(mcpOrigin)
     const clientId = await ensureRegistration(mcpOrigin, metadata)
     // Signed out while the registration was awaited: this authorization would outlive that sign-out.
@@ -441,7 +445,7 @@ export async function createPrismicAuth(args: CreatePrismicAuthArgs): Promise<Pr
 
   // For the desktop app, which doesn't know which Prismic environments the paired browsers use.
   async function signOutEverywhere(): Promise<void> {
-    for (const mcpOrigin of [...servers.keys()]) await signOut(mcpOrigin)
+    for (const mcpOrigin of new Set([...servers.keys(), ...signInOrigins])) await signOut(mcpOrigin)
   }
 
   // The users this daemon is signed in as, for the desktop app's menu.

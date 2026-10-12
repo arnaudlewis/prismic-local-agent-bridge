@@ -44,7 +44,8 @@ const healthUrl = "http://127.0.0.1:7878/health"
 const healthName = "prismic-local-agent-bridge"
 const healthIntervalMs = 500
 const maxHealthBytes = 1024
-const signOutTimeoutMs = 15_000
+// The daemon may wait for two 15 s network deadlines (discovery, revocation) before it answers.
+const signOutTimeoutMs = 45_000
 const healthTimeoutMs = 1000
 const portRetryMs = 30_000
 const stableAfterMs = 60_000
@@ -60,6 +61,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
   let stopRequested = false
   let crashes = 0
   const signOutWaiters = new Map<SignOutAccount, (ok: boolean) => void>()
+  const signOutsInFlight = new Map<SignOutAccount, Promise<boolean>>()
   // Who the daemon runs as, as lines for the menu (src/cli.ts).
   let accounts: string[] = []
 
@@ -158,6 +160,9 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
 
   // Asks the daemon to sign out of an OAuth account and waits for its answer.
   function signOut(account: SignOutAccount): Promise<boolean> {
+    // A second request for the same account joins the first one: one request, one answer.
+    const inFlight = signOutsInFlight.get(account)
+    if (inFlight !== undefined) return inFlight
     const running = child
     if (running === undefined || !running.connected) return Promise.resolve(false)
     const { promise, resolve } = Promise.withResolvers<boolean>()
@@ -166,10 +171,13 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       if (error !== null) resolve(false)
     })
     const timer = setTimeout(() => resolve(false), signOutTimeoutMs)
-    return promise.finally(() => {
+    const result = promise.finally(() => {
       clearTimeout(timer)
       signOutWaiters.delete(account)
+      signOutsInFlight.delete(account)
     })
+    signOutsInFlight.set(account, result)
+    return result
   }
 
   return {

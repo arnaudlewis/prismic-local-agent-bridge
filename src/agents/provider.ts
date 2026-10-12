@@ -56,8 +56,8 @@ export interface AgentProvider {
   // AgentCredentials.epoch to never start an agent with credentials that changed while it was getting ready.
   credentialEpoch?(): number
   // One line telling who the agent runs as (an email and a plan, an API key's last characters), for the desktop app's
-  // menu. Never a secret.
-  accountSummary?(): Promise<string>
+  // menu. Never a secret. Aborting `signal` (the daemon is shutting down) stops any process it started.
+  accountSummary?(signal?: AbortSignal): Promise<string>
   // Secrets this agent's credentials are made of (an API key), known to the daemon. Everything the daemon sends to the
   // browser or stores has them replaced, in case the agent repeats one.
   secretValues?(): string[]

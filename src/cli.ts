@@ -34,6 +34,7 @@ const defaultRefreshMarginMs = 300_000
 // The desktop app (desktop/src/bridgeProcess.ts) reads this exit code.
 const portInUseExitCode = 3
 const accountsRefreshMs = 30_000
+const accountsMinGapMs = 5_000
 
 // The desktop app stops the daemon by closing the IPC channel, and a crashed app takes the daemon down with it. The
 // listener is registered before anything is awaited: a disconnect during startup must not leave a daemon nobody
@@ -90,6 +91,11 @@ async function main(): Promise<void> {
     }),
   ]
   const channels = createWindowChannels()
+  // State of publishAccounts below; declared first because a Page Builder can connect as soon as the server listens.
+  let collectingAccounts = false
+  let accountsRequestedAgain = false
+  // Aborted at shutdown: it stops a `claude auth status` that is still running.
+  const accountsAbort = new AbortController()
   // The desktop app (desktop/src/bridgeProcess.ts) shows which Page Builders are linked. The IPC channel is private
   // to it, unlike /health, which any allowed page can read.
   channels.onEditorsChanged((origins) => {
@@ -165,18 +171,37 @@ async function main(): Promise<void> {
   setInterval(publishAccounts, accountsRefreshMs).unref()
 
   // The desktop app shows who the daemon runs as (an email, a plan): over the private IPC channel, never the browser.
+  // One collection at a time, and at least accountsMinGapMs between two: a page that connects and disconnects in a loop
+  // must not be able to start a `claude auth status` per change.
   function publishAccounts(): void {
     if (!process.connected) return
-    void describeAccounts().then((accounts) => {
-      if (process.connected) process.send?.({ type: "accounts", accounts })
-    })
+    if (collectingAccounts) {
+      accountsRequestedAgain = true
+      return
+    }
+    collectingAccounts = true
+    void describeAccounts()
+      .then((accounts) => {
+        // A newer collection is already queued (an account changed meanwhile): this snapshot is out of date.
+        if (!accountsRequestedAgain && process.connected) process.send?.({ type: "accounts", accounts })
+      })
+      .finally(() => {
+        setTimeout(() => {
+          collectingAccounts = false
+          if (!accountsRequestedAgain) return
+          accountsRequestedAgain = false
+          publishAccounts()
+        }, accountsMinGapMs).unref()
+      })
   }
 
   async function describeAccounts(): Promise<string[]> {
     const users = prismicAuth.signedInUsers()
     const lines = [users.length === 0 ? "Prismic: not signed in" : `Prismic: signed in as ${users.join(", ")}`]
     for (const provider of providers) {
-      if (provider.accountSummary !== undefined) lines.push(await provider.accountSummary().catch(() => `${provider.label}: unknown`))
+      if (provider.accountSummary !== undefined) {
+        lines.push(await provider.accountSummary(accountsAbort.signal).catch(() => `${provider.label}: unknown`))
+      }
     }
     return lines
   }
@@ -185,6 +210,7 @@ async function main(): Promise<void> {
   function shutdown(): void {
     if (shuttingDown) return
     shuttingDown = true
+    accountsAbort.abort()
     agents.stopAll()
     void server.close().then(() => process.exit(0))
   }

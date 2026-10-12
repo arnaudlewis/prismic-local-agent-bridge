@@ -139,8 +139,10 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
       }
     },
 
-    async accountSummary() {
-      if (useClaudeCodeLogin) return describeClaudeCodeLogin({ binaryPath: runtime?.binaryPath() })
+    async accountSummary(signal) {
+      if (useClaudeCodeLogin) {
+        return describeClaudeCodeLogin({ binaryPath: runtime?.binaryPath(), configDir: userClaudeHome, signal })
+      }
       const status = await vault.status()
       return status.configured ? `Claude: API key ${status.keyHint ?? "configured"}` : "Claude: no API key yet"
     },
