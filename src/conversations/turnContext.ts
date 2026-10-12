@@ -9,7 +9,6 @@ import {
 } from "../editorContext.ts"
 import { browserWindowId } from "../channelKey.ts"
 import { readEditorContext } from "../editorContextClient.ts"
-import type { Session } from "../protocol.ts"
 import type { Context } from "./context.ts"
 import { providerOf } from "./context.ts"
 import { emit, notify } from "./output.ts"
@@ -23,19 +22,18 @@ const contextReadFailedNotice = "Couldn't read the editor context this turn."
 interface ReadTurnContextArgs {
   conversation: Conversation
   agent: AgentFields
-  session: Session
   generation: number
 }
 
 // Reads the editor context itself instead of leaving it to the model. A failure only costs this turn its context
 // block (the preamble still tells the agent to call the tool): it never blocks or fails the turn.
 export async function readTurnContext(ctx: Context, args: ReadTurnContextArgs): Promise<string | undefined> {
-  const { conversation, agent, session, generation } = args
+  const { conversation, agent, generation } = args
   const windowId = conversation.windowId
   if (windowId === undefined) return undefined
   const outcome = await readEditorContext({
-    mcpServerUrl: session.mcpServerUrl,
-    prismicToken: session.prismicToken,
+    upstream: ctx.prismic.upstream,
+    mcpOrigin: agent.startedWith.mcpOrigin,
     windowId: browserWindowId(windowId),
     pinnedDocumentId: conversation.pinnedDocumentId,
     timeoutMs: ctx.config.contextReadTimeoutMs,

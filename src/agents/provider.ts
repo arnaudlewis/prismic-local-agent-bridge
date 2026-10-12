@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 
 import type { ToolIdentity } from "../editorContext.ts"
+import type { PairedBrowser } from "../pairing.ts"
 import type { AgentId, AgentStatus } from "../protocol.ts"
 
 // An agent the daemon can run over ACP. Everything the conversation machinery (src/conversations) needs to know
@@ -88,14 +89,26 @@ export interface ToolUpdate {
   content?: unknown
 }
 
+// An HTTP route served next to the fixed ones: the agents' sign-in flows, the connect popup, the editor context
+// forwarding and the agents' MCP proxy.
 export interface ProviderRoute {
   method: "GET" | "POST" | "PUT" | "DELETE"
   path: string
-  // "bearer" needs a paired browser's token; "none" is for redirects coming back from a sign-in page.
+  // For paths with a variable part (a window id): matched in addition to `path`.
+  pathPattern?: RegExp
+  // "bearer" needs a paired browser's token (and an Origin equal to the one it was issued for); "none" is for
+  // redirects coming back from a sign-in page, pages the daemon serves, and routes that check their own credentials.
   auth: "bearer" | "none"
-  // Browser requests to a route normally need an allowed Origin; sign-in callbacks can't have one.
+  // Browser requests to a route normally need an allowed Origin; sign-in callbacks can't have one, and routes that
+  // check the Origin themselves opt out of the general check.
   originExempt?: boolean
-  handle(context: { req: IncomingMessage; res: ServerResponse; url: URL }): Promise<void> | void
+  // `paired` is set on "bearer" routes.
+  handle(context: {
+    req: IncomingMessage
+    res: ServerResponse
+    url: URL
+    paired: PairedBrowser | undefined
+  }): Promise<void> | void
 }
 
 // Thrown by authenticate(): `notice` is shown to the user as is.

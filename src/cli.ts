@@ -13,7 +13,14 @@ import type { AgentMode } from "./agents/codex/modes.ts"
 import type { AgentProvider } from "./agents/provider.ts"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
+import { connectRateLimit, connectRoutes } from "./connect/connectRoutes.ts"
+import { createPendingConnections } from "./connect/pendingConnections.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
+import { agentMcpRoutes, createAgentMcpGrants } from "./prismic/agentMcpProxy.ts"
+import { editorContextRoutes } from "./prismic/editorContextRoutes.ts"
+import { createMcpUpstream } from "./prismic/mcpUpstream.ts"
+import { createPrismicAuth, forgetPrismicSignIn } from "./prismic/prismicAuth.ts"
+import { createRateLimiter } from "./rateLimit.ts"
 import { createApiKeyVault, createDefaultSecretStores } from "./secrets/apiKeyVault.ts"
 import { passEnvNamePattern, withheldProxyNames } from "./conversations/childEnv.ts"
 import { bridgeInfo } from "./protocol.ts"
@@ -32,9 +39,14 @@ main().catch((error: unknown) => {
 async function main(): Promise<void> {
   const options = parseOptions()
 
-  const configHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
-  const dataDir = join(configHome, "prismic-local-agent-bridge")
+  const dataDir = process.env.PRISMIC_AI_HOME ?? join(homedir(), ".prismic-ai")
   mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+
+  if (options.signOutPrismic) {
+    await forgetPrismicSignIn(dataDir)
+    console.info("Removed the stored Prismic sign-in.")
+    return
+  }
 
   const project = resolveProjectDir({ explicit: options.project, dataDir })
   const userCodexHome = options.useUserCodex ? resolveUserCodexHome() : undefined
@@ -43,7 +55,7 @@ async function main(): Promise<void> {
     forgetPairings(dataDir)
     console.info("Forgot all paired browsers: every browser must pair again.")
   }
-  const pairing = createPairing({ dataDir, onCodeChanged: (code) => console.info(`Pairing code: ${code}`) })
+  const pairing = createPairing({ dataDir })
   // The agent registry: each provider is one agent a browser can pick with `session.agent`. To add one, implement
   // AgentProvider (src/agents/provider.ts), add its id to `agentIds` in protocol.ts and list it here.
   const providers: AgentProvider[] = [
@@ -57,18 +69,44 @@ async function main(): Promise<void> {
     }),
     createClaudeProvider({
       dataDir,
-      vault: createApiKeyVault(await createDefaultSecretStores({ dataDir, name: "claude-api-key" })),
+      vault: createApiKeyVault(
+        await createDefaultSecretStores({ dataDir, name: "claude-api-key", label: "Anthropic API key" }),
+      ),
       userClaudeHome,
     }),
   ]
   const channels = createWindowChannels()
-  const agents = createAgentSessions({ channels, dataDir, projectDir: project.path, providers, passEnv: options.passEnv })
-  const server = await startBridgeServer({
-    port: options.port,
-    allowedOrigins: options.origins,
+  const prismicAuth = await createPrismicAuth({ dataDir, port: options.port })
+  const upstream = createMcpUpstream({ auth: prismicAuth })
+  const grants = createAgentMcpGrants()
+  const agents = createAgentSessions({
+    channels,
+    dataDir,
     projectDir: project.path,
     providers,
+    passEnv: options.passEnv,
+    prismic: { auth: prismicAuth, upstream, grants, bridgePort: options.port },
+  })
+  const server = await startBridgeServer({
+    port: options.port,
+    extraOrigins: options.origins,
+    projectDir: project.path,
+    providers,
+    routes: [
+      ...connectRoutes({
+        pending: createPendingConnections(),
+        pairing,
+        prismicAuth,
+        extraOrigins: options.origins,
+        port: options.port,
+        projectDir: project.path,
+        limiter: createRateLimiter(connectRateLimit),
+      }),
+      ...agentMcpRoutes({ grants, upstream, channels }),
+      ...editorContextRoutes({ prismicAuth, upstream }),
+    ],
     pairing,
+    prismicAuth,
     channels,
   })
 
@@ -79,7 +117,7 @@ async function main(): Promise<void> {
       : `Project: ${project.path}`,
   )
   console.info(`Listening on http://127.0.0.1:${options.port}`)
-  console.info(`Allowed origins: ${options.origins.join(", ")}`)
+  console.info(`Allowed origins: deployed Page Builders, ${options.origins.join(", ")}`)
   for (const provider of providers) {
     for (const line of await provider.bannerLines()) console.info(line)
   }
@@ -89,7 +127,7 @@ async function main(): Promise<void> {
   }
   if (options.passEnv.length > 0) console.info(`Passing to the agents (--pass-env): ${options.passEnv.join(", ")}`)
   console.info(`Paired browsers: ${pairing.pairedBrowserCount()}`)
-  console.info(`Pairing code: ${pairing.currentCode()}`)
+  console.info(`Prismic local agent bridge on http://127.0.0.1:${options.port}. Connect from the agent panel in the Page Builder.`)
 
   function shutdown(): void {
     agents.stopAll()
@@ -109,6 +147,7 @@ interface CliOptions {
   useUserClaude: boolean
   passEnv: string[]
   forgetPairings: boolean
+  signOutPrismic: boolean
   refreshMarginMs: number
 }
 
@@ -123,6 +162,7 @@ function parseOptions(): CliOptions {
       "use-user-codex": { type: "boolean" },
       "use-user-claude": { type: "boolean" },
       "forget-pairings": { type: "boolean" },
+      "sign-out-prismic": { type: "boolean" },
       "pass-env": { type: "string", multiple: true },
     },
     strict: true,
@@ -143,6 +183,13 @@ function parseOptions(): CliOptions {
     throw new Error(`Invalid PRISMIC_BRIDGE_TOKEN_REFRESH_MARGIN_MS: ${rawMargin}`)
   }
 
+  const origins = [...new Set([defaultOrigin, ...(values.origin ?? [])])]
+  for (const origin of origins) {
+    if (!URL.canParse(origin) || new URL(origin).origin !== origin) {
+      throw new Error(`Invalid --origin: ${origin} (use an exact origin such as https://example.com)`)
+    }
+  }
+
   const passEnv = [...new Set(values["pass-env"] ?? [])]
   for (const name of passEnv) {
     if (!passEnvNamePattern.test(name)) throw new Error(`Invalid --pass-env name: ${name} (it must match ${passEnvNamePattern.source})`)
@@ -151,12 +198,13 @@ function parseOptions(): CliOptions {
   return {
     project: values.project,
     port,
-    origins: values.origin ?? [defaultOrigin],
+    origins,
     model,
     agentMode,
     useUserCodex: values["use-user-codex"] ?? false,
     useUserClaude: values["use-user-claude"] ?? false,
     forgetPairings: values["forget-pairings"] ?? false,
+    signOutPrismic: values["sign-out-prismic"] ?? false,
     passEnv,
     refreshMarginMs,
   }

@@ -11,9 +11,11 @@ import { startBridgeServer } from "./bridgeServer.ts"
 import type { BridgeServer } from "./bridgeServer.ts"
 import { createPairing } from "./pairing.ts"
 import type { ClientMessage } from "./protocol.ts"
+import { createFakePrismic } from "./testing/fakePrismic.ts"
 import { createWindowChannels } from "./windowChannels.ts"
 
 const origin = "http://localhost:5173"
+const mcpOrigin = "https://mcp.prismic.io"
 const windowId = "11111111-1111-4111-8111-111111111111"
 const servers: BridgeServer[] = []
 
@@ -35,21 +37,23 @@ function freePort(): Promise<number> {
 describe("websocket frames", () => {
   it("closes a connection that sends a frame over 256 KiB, and delivers a normal one", async () => {
     const port = await freePort()
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const channels = createWindowChannels()
     const received: unknown[] = []
     channels.onMessage((_windowId, message) => received.push(message))
     servers.push(
       await startBridgeServer({
         port,
-        allowedOrigins: [origin],
+        extraOrigins: [origin],
         projectDir: "/tmp",
         providers: [],
+        routes: [],
         pairing,
+        prismicAuth: createFakePrismic().auth,
         channels,
       }),
     )
-    const token = pairing.tryPair(pairing.currentCode())
+    const token = pairToken(pairing)
     const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}`, { headers: { Origin: origin } })
     await new Promise((resolve, reject) => {
       socket.once("open", resolve)
@@ -74,6 +78,7 @@ async function startServer(
   pairing: ReturnType<typeof createPairing>,
   recheckIntervalMs?: number,
   providers: AgentProvider[] = [],
+  prismic = createFakePrismic(),
 ) {
   const port = await freePort()
   const channels = createWindowChannels({ recheckIntervalMs })
@@ -82,25 +87,25 @@ async function startServer(
   servers.push(
     await startBridgeServer({
       port,
-      allowedOrigins: [origin],
+      extraOrigins: [origin],
       projectDir: "/tmp",
       providers,
+      routes: [],
       pairing,
+      prismicAuth: prismic.auth,
       channels,
     }),
   )
-  return { port, received }
+  return { port, received, prismic, channels }
 }
 
-function pairToken(pairing: ReturnType<typeof createPairing>): string {
-  const token = pairing.tryPair(pairing.currentCode())
-  if (token === undefined) throw new Error("pairing failed")
-  return token
+function pairToken(pairing: ReturnType<typeof createPairing>, browserOrigin = origin): string {
+  return pairing.issueToken({ origin: browserOrigin, mcpOrigin })
 }
 
-async function openSocket(port: number, token: string): Promise<{ socket: WebSocket; closed: Promise<number> }> {
+async function openSocket(port: number, token: string, browserOrigin = origin): Promise<{ socket: WebSocket; closed: Promise<number> }> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}`, {
-    headers: { Origin: origin },
+    headers: { Origin: browserOrigin },
   })
   const closed = new Promise<number>((resolve) => socket.once("close", resolve))
   await new Promise((resolve, reject) => {
@@ -152,7 +157,7 @@ describe("a malformed frame while an unauthenticated socket is closing", () => {
       const onUncaught = (error: Error) => uncaught.push(error)
       process.on("uncaughtException", onUncaught)
       try {
-        const { port } = await startServer(createPairing({ onCodeChanged: () => {} }))
+        const { port } = await startServer(createPairing({}))
 
         await upgradeThenSendBadFrame(port, query)
         await new Promise((resolve) => setTimeout(resolve, 100))
@@ -166,19 +171,64 @@ describe("a malformed frame while an unauthenticated socket is closing", () => {
   )
 
   it("still closes with 4401 for an invalid token", async () => {
-    const { port } = await startServer(createPairing({ onCodeChanged: () => {} }))
+    const { port } = await startServer(createPairing({}))
     const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=nope`, { headers: { Origin: origin } })
 
     const code = await new Promise<number>((resolve) => socket.once("close", resolve))
 
     expect(code).toBe(4401)
   })
+
+  it("closes with 4401 a valid token presented from another allowed origin than the one it was issued to", async () => {
+    const pairing = createPairing({})
+    const token = pairToken(pairing)
+    const { port, received } = await startServer(pairing)
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}`, {
+      headers: { Origin: "https://foo.prismic.io" },
+    })
+    socket.on("open", () => socket.send(JSON.stringify({ type: "chat_cancel" })))
+
+    const code = await new Promise<number>((resolve) => socket.once("close", resolve))
+
+    expect(code).toBe(4401)
+    expect(received).toEqual([])
+  })
+
+  it("opens a socket from a deployed editor origin, and tells the channels the MCP origin it was paired with", async () => {
+    const pairing = createPairing({})
+    const deployed = "https://foo.prismic.io"
+    const token = pairing.issueToken({ origin: deployed, mcpOrigin: "https://mcp.wroom.io" })
+    const { port, received, channels } = await startServer(pairing)
+
+    const { socket } = await openSocket(port, token, deployed)
+    socket.send(JSON.stringify({ type: "chat_cancel" }))
+    await vi.waitFor(() => expect(received).toHaveLength(1))
+
+    expect(channels.mcpOrigin(`${windowId}/codex`)).toBe("https://mcp.wroom.io")
+  })
+
+  it("refuses the upgrade of a look-alike origin before any token is looked at", async () => {
+    const pairing = createPairing({})
+    const token = pairToken(pairing, "https://foo.prismic.io")
+    const { port } = await startServer(pairing)
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}`, {
+      headers: { Origin: "https://www.prismic.io" },
+    })
+
+    const status = await new Promise<number | undefined>((resolve) => {
+      socket.once("unexpected-response", (_request, response) => resolve(response.statusCode))
+      socket.once("open", () => resolve(undefined))
+      socket.once("error", () => {})
+    })
+
+    expect(status).toBe(403)
+  })
 })
 
 describe("a socket whose pairing is gone", () => {
   it("is closed with 4401 and its message never dispatched once the pairing expired", async () => {
     let time = 1_000_000
-    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time })
+    const pairing = createPairing({ now: () => time })
     const token = pairToken(pairing)
     const { port, received } = await startServer(pairing)
     const { socket, closed } = await openSocket(port, token)
@@ -195,7 +245,7 @@ describe("a socket whose pairing is gone", () => {
 
   it("is closed with 4401 and its message never dispatched when its pairing was evicted by a 21st browser", async () => {
     let time = 1_000_000
-    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time })
+    const pairing = createPairing({ now: () => time })
     const evicted = pairToken(pairing)
     const { port, received } = await startServer(pairing)
     const { socket, closed } = await openSocket(port, evicted)
@@ -219,13 +269,13 @@ describe("a socket whose pairing is gone", () => {
   it("keeps a valid pairing working and refreshes lastUsedAt from socket activity, at most once an hour", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "bridge-ws-pairing-"))
     let time = 1_000_000
-    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time, dataDir })
+    const pairing = createPairing({ now: () => time, dataDir })
     const token = pairToken(pairing)
     const { port, received } = await startServer(pairing)
     const { socket } = await openSocket(port, token)
     const lastUsedOnDisk = () =>
-      (JSON.parse(readFileSync(join(dataDir, "pairing.json"), "utf8")) as { tokens: Array<{ lastUsedAt: number }> })
-        .tokens[0]?.lastUsedAt
+      (JSON.parse(readFileSync(join(dataDir, "pairing.json"), "utf8")) as { browsers: Array<{ lastUsedAt: number }> })
+        .browsers[0]?.lastUsedAt
 
     time += 2 * hour
     socket.send(JSON.stringify({ type: "chat_cancel" }))
@@ -241,7 +291,7 @@ describe("a socket whose pairing is gone", () => {
 
   it("closes idle sockets of an expired pairing at the periodic re-check", async () => {
     let time = 1_000_000
-    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time })
+    const pairing = createPairing({ now: () => time })
     const token = pairToken(pairing)
     const { port } = await startServer(pairing, 50)
     const { closed } = await openSocket(port, token)
@@ -297,16 +347,20 @@ function fakeProvider(overrides: Partial<AgentProvider> = {}): AgentProvider {
 }
 
 async function startWithProviders(providers: AgentProvider[]) {
-  const pairing = createPairing({ onCodeChanged: () => {} })
-  const { port } = await startServer(pairing, undefined, providers)
-  return { port, token: pairToken(pairing) }
+  const pairing = createPairing({})
+  const { port, prismic } = await startServer(pairing, undefined, providers)
+  return { port, prismic, pairing, token: pairToken(pairing) }
+}
+
+function authorized(token: string, browserOrigin = origin): { headers: Record<string, string> } {
+  return { headers: { Authorization: `Bearer ${token}`, Origin: browserOrigin } }
 }
 
 describe("GET /status", () => {
-  it("answers { projectDir, agents: { codex: { agentMode, model?, account } } } to a paired browser", async () => {
+  it("answers { projectDir, agents, prismic } to a paired browser", async () => {
     const { port, token } = await startWithProviders([fakeProvider()])
 
-    const response = await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await fetch(`http://127.0.0.1:${port}/status`, authorized(token))
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({
@@ -318,30 +372,106 @@ describe("GET /status", () => {
           account: { kind: "chatgpt", status: "signed_in", email: "me@example.com", planUsage: true },
         },
       },
+      prismic: { status: "signed_in", userId: "user-1" },
     })
+  })
+
+  it("reports the Prismic sign-in of the MCP origin the browser was paired with", async () => {
+    const { port, token, prismic } = await startWithProviders([])
+    const status = async () => ((await (await fetch(`http://127.0.0.1:${port}/status`, authorized(token))).json()) as { prismic: unknown }).prismic
+
+    prismic.setUserId("someone-else")
+    expect(await status()).toEqual({ status: "signed_in", userId: "someone-else" })
+    prismic.setUserId(undefined)
+    expect(await status()).toEqual({ status: "signed_out" })
   })
 
   it("has no old top-level agentMode, model or chatgpt", async () => {
     const { port, token } = await startWithProviders([fakeProvider()])
 
-    const body = (await (await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })).json()) as Record<string, unknown>
+    const body = (await (await fetch(`http://127.0.0.1:${port}/status`, authorized(token))).json()) as Record<string, unknown>
 
-    expect(Object.keys(body).sort()).toEqual(["agents", "projectDir"])
+    expect(Object.keys(body).sort()).toEqual(["agents", "prismic", "projectDir"])
   })
 
   it("needs a token", async () => {
     const { port } = await startWithProviders([fakeProvider()])
 
-    expect((await fetch(`http://127.0.0.1:${port}/status`)).status).toBe(401)
-    expect((await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: "Bearer nope" } })).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/status`, { headers: { Origin: origin } })).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/status`, authorized("nope"))).status).toBe(401)
+  })
+
+  it("refuses a valid token presented with another origin, or none", async () => {
+    const { port, token } = await startWithProviders([])
+
+    // evil.com is refused before the token is looked at; the others are allowed origins the token was not issued to.
+    expect((await fetch(`http://127.0.0.1:${port}/status`, authorized(token, "https://evil.com"))).status).toBe(403)
+    expect((await fetch(`http://127.0.0.1:${port}/status`, authorized(token, "https://foo.prismic.io"))).status).toBe(401)
+    expect((await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })).status).toBe(401)
   })
 
   it("lists no agent when there is none", async () => {
     const { port, token } = await startWithProviders([])
 
-    const response = await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: `Bearer ${token}` } })
+    const response = await fetch(`http://127.0.0.1:${port}/status`, authorized(token))
 
-    expect(await response.json()).toEqual({ projectDir: "/tmp", agents: {} })
+    expect(await response.json()).toEqual({ projectDir: "/tmp", agents: {}, prismic: { status: "signed_in", userId: "user-1" } })
+  })
+})
+
+describe("POST /prismic/sign-out", () => {
+  it("signs the daemon out of Prismic for a paired browser", async () => {
+    const { port, token, prismic } = await startWithProviders([])
+
+    const response = await fetch(`http://127.0.0.1:${port}/prismic/sign-out`, { method: "POST", ...authorized(token) })
+
+    expect(response.status).toBe(204)
+    expect(prismic.auth.status(mcpOrigin)).toEqual({ status: "signed_out" })
+  })
+
+  it("does nothing without the bearer or from another origin", async () => {
+    const { port, token, prismic } = await startWithProviders([])
+    const url = `http://127.0.0.1:${port}/prismic/sign-out`
+
+    expect((await fetch(url, { method: "POST", headers: { Origin: origin } })).status).toBe(401)
+    expect((await fetch(url, { method: "POST", ...authorized("nope") })).status).toBe(401)
+    expect((await fetch(url, { method: "POST", ...authorized(token, "https://foo.prismic.io") })).status).toBe(401)
+    expect((await fetch(url, { method: "POST", ...authorized(token, "https://evil.com") })).status).toBe(403)
+
+    expect(prismic.auth.status(mcpOrigin)).toEqual({ status: "signed_in", userId: "user-1" })
+  })
+})
+
+describe("browser origins", () => {
+  it("accepts a deployed editor origin, and refuses look-alikes, with and without a token", async () => {
+    const pairing = createPairing({})
+    const { port } = await startServer(pairing)
+    const deployed = "https://foo.prismic.io"
+    const token = pairToken(pairing, deployed)
+
+    const paired = await fetch(`http://127.0.0.1:${port}/status`, authorized(token, deployed))
+    expect(paired.status).toBe(200)
+    expect(paired.headers.get("access-control-allow-origin")).toBe(deployed)
+
+    for (const refused of ["https://www.prismic.io", "https://evil.com", "http://foo.prismic.io", "https://a.b.prismic.io"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: refused } })
+      expect(response.status, refused).toBe(403)
+    }
+    expect((await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: deployed } })).status).toBe(200)
+  })
+
+  it("answers the preflight of a deployed editor with the user-id header allowed, and refuses a look-alike origin", async () => {
+    const { port } = await startServer(createPairing({}))
+    const preflight = (browserOrigin: string) =>
+      fetch(`http://127.0.0.1:${port}/status`, {
+        method: "OPTIONS",
+        headers: { Origin: browserOrigin, "Access-Control-Request-Method": "GET" },
+      })
+
+    const allowed = await preflight("https://foo.prismic.io")
+    expect(allowed.status).toBe(204)
+    expect(allowed.headers.get("access-control-allow-headers")).toContain("X-Prismic-User-Id")
+    expect((await preflight("https://www.prismic.io")).status).toBe(403)
   })
 })
 
@@ -350,8 +480,9 @@ describe("provider routes", () => {
     const { port, token } = await startWithProviders([fakeProvider()])
     const url = `http://127.0.0.1:${port}/auth/fake/start`
 
-    expect((await fetch(url, { method: "POST" })).status).toBe(401)
+    expect((await fetch(url, { method: "POST", headers: { Origin: origin } })).status).toBe(401)
     expect((await fetch(url, { method: "POST", headers: { Origin: "https://evil.example", Authorization: `Bearer ${token}` } })).status).toBe(403)
+    expect((await fetch(url, { method: "POST", headers: { Origin: "https://foo.prismic.io", Authorization: `Bearer ${token}` } })).status).toBe(401)
     const ok = await fetch(url, { method: "POST", headers: { Origin: origin, Authorization: `Bearer ${token}` } })
     expect(ok.status).toBe(200)
     expect(await ok.json()).toEqual({ started: true })
@@ -388,10 +519,10 @@ describe("provider routes", () => {
   it("answers 404 for a route no provider registered, and for the old per-agent paths without a provider", async () => {
     const { port, token } = await startWithProviders([])
 
-    for (const path of ["/auth/chatgpt/start", "/auth/chatgpt/sign-out"]) {
+    for (const path of ["/auth/chatgpt/start", "/auth/chatgpt/sign-out", "/pair"]) {
       const response = await fetch(`http://127.0.0.1:${port}${path}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        ...authorized(token),
       })
       expect(response.status).toBe(404)
     }
@@ -414,7 +545,7 @@ describe("provider routes", () => {
 
     const response = await fetch(`http://127.0.0.1:${port}/auth/fake/start`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
+      ...authorized(token),
     })
 
     expect(response.status).toBe(500)
@@ -438,7 +569,7 @@ describe("one socket per window and agent", () => {
   }
 
   it("keeps the Codex and the Claude socket of the same window open side by side", async () => {
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const token = pairToken(pairing)
     const { port, received } = await startServer(pairing)
     const codex = await connect(port, token, "&agent=codex")
@@ -453,7 +584,7 @@ describe("one socket per window and agent", () => {
   })
 
   it("still replaces a second socket for the same window and agent", async () => {
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const token = pairToken(pairing)
     const { port } = await startServer(pairing)
     const first = await connect(port, token, "&agent=claude")
@@ -464,7 +595,7 @@ describe("one socket per window and agent", () => {
   })
 
   it("treats a socket without an agent as a Codex one", async () => {
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const token = pairToken(pairing)
     const { port } = await startServer(pairing)
     const without = await connect(port, token, "")
@@ -475,7 +606,7 @@ describe("one socket per window and agent", () => {
   })
 
   it("rejects an unknown agent before the upgrade", async () => {
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const token = pairToken(pairing)
     const { port } = await startServer(pairing)
     const socket = new WebSocket(`ws://127.0.0.1:${port}/windows/${windowId}?token=${token}&agent=gemini`, {
@@ -492,14 +623,23 @@ describe("one socket per window and agent", () => {
   })
 
   it("reports messages under a key that holds both the window and the agent", async () => {
-    const pairing = createPairing({ onCodeChanged: () => {} })
+    const pairing = createPairing({})
     const token = pairToken(pairing)
     const port = await freePort()
     const channels = createWindowChannels()
     const keys: string[] = []
     channels.onMessage((key) => keys.push(key))
     servers.push(
-      await startBridgeServer({ port, allowedOrigins: [origin], projectDir: "/tmp", providers: [], pairing, channels }),
+      await startBridgeServer({
+        port,
+        extraOrigins: [origin],
+        projectDir: "/tmp",
+        providers: [],
+        routes: [],
+        pairing,
+        prismicAuth: createFakePrismic().auth,
+        channels,
+      }),
     )
     const claude = await connect(port, token, "&agent=claude")
 
@@ -510,7 +650,7 @@ describe("one socket per window and agent", () => {
 
   it("keeps the authorization fence for each socket", async () => {
     let time = 1_000_000
-    const pairing = createPairing({ onCodeChanged: () => {}, now: () => time })
+    const pairing = createPairing({ now: () => time })
     const token = pairToken(pairing)
     const { port, received } = await startServer(pairing)
     const claude = await connect(port, token, "&agent=claude")

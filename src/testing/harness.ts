@@ -10,6 +10,8 @@ import { createAgentSessions } from "../agentSessions.ts"
 import type { AgentSessions } from "../agentSessions.ts"
 import type { BridgeConfigOption, BridgeEvent, HistoryEvent, Session } from "../protocol.ts"
 import type { WindowChannels } from "../windowChannels.ts"
+import { createFakePrismic } from "./fakePrismic.ts"
+import type { FakePrismic } from "./fakePrismic.ts"
 
 export const fakeAgentBin = fileURLToPath(new URL("./fakeAcpAgent.ts", import.meta.url))
 export const windowId = "11111111-1111-4111-8111-111111111111"
@@ -17,8 +19,6 @@ export const conversationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 export const session: Session = {
   agent: "codex",
   conversationId,
-  mcpServerUrl: "http://localhost:3030/mcp",
-  prismicToken: "token",
   repository: "repo",
 }
 
@@ -26,6 +26,8 @@ export interface Harness {
   agents: AgentSessions
   events: BridgeEvent[]
   dataDir: string
+  // The fake Prismic sign-in the machinery runs on: `setUserId` changes the account (or signs out).
+  prismic: FakePrismic
   eventsFor(windowId: string): BridgeEvent[]
   lastMode(): BridgeConfigOption | undefined
 }
@@ -45,6 +47,7 @@ export const fakeAgentEnvNames = [
   "FAKE_AGENT_INIT_DELAY_MS",
   "FAKE_AGENT_KEPT",
   "FAKE_AGENT_LOG",
+  "FAKE_AGENT_MCP_LOG",
   "FAKE_AGENT_MODE_VALUES",
   "FAKE_AGENT_SECRET",
   "FAKE_AGENT_SLOW_CONFIG_MS",
@@ -61,6 +64,11 @@ export interface CreateHarnessArgs {
   // Off by default: most tests don't run an MCP server, and a failed read would add a notice to every prompt.
   readEditorContext?: boolean
   contextReadTimeoutMs?: number
+  // The Prismic MCP origin of every window (a stub's origin when the test reads the editor context) and the OAuth
+  // access token the daemon would use there.
+  // `undefined` given explicitly stands for a window that is not connected (no pairing, so no MCP origin).
+  mcpOrigin?: string | undefined
+  prismicAccessToken?: string
   // Replaces parts of the Codex provider (blocked commands, notices, ...) to show the machinery goes through it.
   providerOverrides?: Partial<AgentProvider>
   // Replaces the names handed to the agent on top of the allowlist (the fake agent's own knobs by default).
@@ -73,8 +81,11 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
   const events: BridgeEvent[] = []
   const byWindow = new Map<string, BridgeEvent[]>()
   const dataDir = args.dataDir ?? mkdtempSync(join(tmpdir(), "bridge-test-"))
+  const mcpOrigin = "mcpOrigin" in args ? args.mcpOrigin : "http://127.0.0.1:1"
+  const prismic = createFakePrismic({ accessToken: args.prismicAccessToken })
   const channels: WindowChannels = {
     attach: () => {},
+    mcpOrigin: () => mcpOrigin,
     send: (target, event) => {
       events.push(event)
       byWindow.set(target, [...(byWindow.get(target) ?? []), event])
@@ -107,12 +118,14 @@ export function createHarness(args: CreateHarnessArgs = {}): Harness {
     detachedSweepIntervalMs: args.detachedSweepIntervalMs,
     readEditorContext: args.readEditorContext ?? false,
     contextReadTimeoutMs: args.contextReadTimeoutMs,
+    prismic: prismic.runtime,
   })
   running.push(agents)
   return {
     agents,
     events,
     dataDir,
+    prismic,
     eventsFor: (target) => byWindow.get(target) ?? [],
     lastMode() {
       const configs = events.filter((event) => event.type === "session_config")

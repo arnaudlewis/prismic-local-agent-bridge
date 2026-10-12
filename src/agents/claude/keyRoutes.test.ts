@@ -7,6 +7,7 @@ import type { BridgeServer } from "../../bridgeServer.ts"
 import { createPairing } from "../../pairing.ts"
 import { createApiKeyVault } from "../../secrets/apiKeyVault.ts"
 import type { RevocationMarker } from "../../secrets/revocationMarker.ts"
+import { createFakePrismic } from "../../testing/fakePrismic.ts"
 import { createMemorySecretStore } from "../../testing/memorySecretStore.ts"
 import { createWindowChannels } from "../../windowChannels.ts"
 import { createClaudeProvider } from "./claudeProvider.ts"
@@ -46,8 +47,8 @@ interface Setup {
 
 async function setup(args: { stored?: string; env?: string; backend?: "keychain" | "file"; revocation?: RevocationMarker } = {}): Promise<Setup> {
   const port = await freePort()
-  const pairing = createPairing({ onCodeChanged: () => {} })
-  const token = pairing.tryPair(pairing.currentCode()) ?? ""
+  const pairing = createPairing({})
+  const token = pairing.issueToken({ origin, mcpOrigin: "https://mcp.prismic.io" })
   const store = createMemorySecretStore(args.stored, args.backend)
   const vault = createApiKeyVault({ store, env: () => args.env, revocation: args.revocation })
   const validated: string[] = []
@@ -67,7 +68,16 @@ async function setup(args: { stored?: string; env?: string; backend?: "keychain"
   for (const method of ["log", "info", "warn", "error"] as const) {
     vi.spyOn(console, method).mockImplementation((...logged: unknown[]) => void logs.push(logged))
   }
-  servers.push(await startBridgeServer({ port, allowedOrigins: [origin], projectDir: "/tmp", providers: [provider], pairing, channels: createWindowChannels() }))
+  servers.push(await startBridgeServer({
+      port,
+      extraOrigins: [origin],
+      projectDir: "/tmp",
+      providers: [provider],
+      routes: [],
+      pairing,
+      prismicAuth: createFakePrismic().auth,
+      channels: createWindowChannels(),
+    }),)
   return {
     port,
     token,
@@ -116,7 +126,7 @@ function send(s: Setup, method: string, options: { body?: string; json?: unknown
 }
 
 async function status(s: Setup): Promise<unknown> {
-  const response = await fetch(`http://127.0.0.1:${s.port}/status`, { headers: { Authorization: `Bearer ${s.token}` } })
+  const response = await fetch(`http://127.0.0.1:${s.port}/status`, { headers: { Authorization: `Bearer ${s.token}`, Origin: origin } })
   return ((await response.json()) as { agents: { claude: unknown } }).agents.claude
 }
 
@@ -346,6 +356,8 @@ describe("DELETE /auth/claude/key", () => {
 
     expect((await send(s, "DELETE", { token: null })).status).toBe(401)
     expect((await send(s, "DELETE", { origin: "https://evil.example" })).status).toBe(403)
+    // An allowed editor origin the token was not issued to.
+    expect((await send(s, "DELETE", { origin: "https://foo.prismic.io" })).status).toBe(401)
     expect(s.store.value()).toBe(key)
   })
 

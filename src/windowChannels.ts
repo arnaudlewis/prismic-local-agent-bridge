@@ -9,9 +9,17 @@ const recheckIntervalMs = 60_000
 type MessageListener = (windowId: string, message: ClientMessage) => void
 type WindowClosedListener = (windowId: string) => void
 
+export interface WindowAccess {
+  // Called before every inbound message and periodically; once it returns false the socket is closed.
+  isAuthorized(): boolean
+  // The Prismic MCP origin of the pairing this socket authenticated with.
+  mcpOrigin: string
+}
+
 export interface WindowChannels {
-  // `isAuthorized` is called before every inbound message and periodically; once it returns false the socket is closed.
-  attach(windowId: string, socket: WebSocket, isAuthorized: () => boolean): void
+  attach(windowId: string, socket: WebSocket, access: WindowAccess): void
+  // The Prismic MCP origin of the window's current socket, while it is attached.
+  mcpOrigin(windowId: string): string | undefined
   send(windowId: string, event: BridgeEvent): void
   onMessage(listener: MessageListener): void
   onWindowClosed(listener: WindowClosedListener): void
@@ -25,6 +33,7 @@ interface CreateWindowChannelsArgs {
 export function createWindowChannels(args: CreateWindowChannelsArgs = {}): WindowChannels {
   const recheckMs = args.recheckIntervalMs ?? recheckIntervalMs
   const sockets = new Map<string, WebSocket>()
+  const mcpOrigins = new Map<string, string>()
   const recheckTimers = new Map<WebSocket, NodeJS.Timeout>()
   const graceTimers = new Map<string, NodeJS.Timeout>()
   const messageListeners: MessageListener[] = []
@@ -47,6 +56,7 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
   function handleSocketClosed(windowId: string, socket: WebSocket): void {
     if (sockets.get(windowId) !== socket) return
     sockets.delete(windowId)
+    mcpOrigins.delete(windowId)
     const timer = setTimeout(() => {
       graceTimers.delete(windowId)
       for (const listener of windowClosedListeners) listener(windowId)
@@ -56,7 +66,9 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
   }
 
   return {
-    attach(windowId, socket, isAuthorized) {
+    attach(windowId, socket, access) {
+      const { isAuthorized } = access
+      mcpOrigins.set(windowId, access.mcpOrigin)
       const graceTimer = graceTimers.get(windowId)
       if (graceTimer !== undefined) {
         clearTimeout(graceTimer)
@@ -99,6 +111,7 @@ export function createWindowChannels(args: CreateWindowChannelsArgs = {}): Windo
       })
       socket.on("error", (error) => console.warn(`Socket error for window ${windowId}: ${error.message}`))
     },
+    mcpOrigin: (windowId) => mcpOrigins.get(windowId),
     send(windowId, event) {
       const socket = sockets.get(windowId)
       if (socket === undefined || socket.readyState !== socket.OPEN) return

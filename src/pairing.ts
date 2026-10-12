@@ -1,11 +1,7 @@
-import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto"
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
-
-const maxFailedAttempts = 5
-const initialCooldownMs = 30_000
-const maxCooldownMs = 15 * 60_000
 
 const pairingFileName = "pairing.json"
 const maxPairingFileBytes = 64 * 1024
@@ -14,31 +10,38 @@ const unusedTokenLifetimeMs = 30 * 24 * 60 * 60 * 1000
 // lastUsedAt is kept in memory on every request but written at most this often.
 const lastUsedPersistIntervalMs = 60 * 60 * 1000
 
-const PairedBrowserSchema = z.object({
-  hash: z.string().regex(/^[0-9a-f]{64}$/),
+const StoredBrowserSchema = z.object({
+  tokenHash: z.string().regex(/^[0-9a-f]{64}$/),
+  origin: z.string().max(300),
+  mcpOrigin: z.string().max(300),
   createdAt: z.number(),
   lastUsedAt: z.number(),
 })
 
 const PairingFileSchema = z.object({
-  version: z.literal(1),
-  tokens: z.array(PairedBrowserSchema).max(maxPairedBrowsers),
+  version: z.literal(2),
+  browsers: z.array(StoredBrowserSchema).max(maxPairedBrowsers),
 })
 
-type PairedBrowser = z.infer<typeof PairedBrowserSchema>
+type StoredBrowser = z.infer<typeof StoredBrowserSchema>
+
+// What a pairing binds: the browser origin that may use the token, and the Prismic MCP origin its agents talk to.
+export interface PairedBrowser {
+  origin: string
+  mcpOrigin: string
+}
 
 interface CreatePairingArgs {
-  onCodeChanged: (code: string) => void
   now?: () => number
   // Where paired browsers are remembered across restarts (as token hashes). Without it they live in memory only.
   dataDir?: string
 }
 
 export interface Pairing {
-  currentCode(): string
-  tryPair(code: string): string | undefined
-  isValidToken(token: string): boolean
-  cooldownRemainingMs(): number
+  // Called once the user approved a connection (see src/connect): returns the token the browser keeps.
+  issueToken(browser: PairedBrowser): string
+  // The browser a token was issued to, when the request comes from the origin it was issued for.
+  validateToken(token: string, origin: string | undefined): PairedBrowser | undefined
   pairedBrowserCount(): number
 }
 
@@ -47,26 +50,10 @@ export function forgetPairings(dataDir: string): void {
 }
 
 export function createPairing(args: CreatePairingArgs): Pairing {
-  const { onCodeChanged, now = Date.now, dataDir } = args
+  const { now = Date.now, dataDir } = args
 
-  let code = generateCode()
-  let failedAttempts = 0
-  // Cooldown outlives code rotation: rotating alone would give an attacker unlimited guesses.
-  let nextCooldownMs = initialCooldownMs
-  let cooldownUntil = 0
-  let browsers: PairedBrowser[] = []
+  let browsers: StoredBrowser[] = []
   let lastPersistedAt = now()
-
-  function rotateCode(): void {
-    const previous = code
-    while (code === previous) code = generateCode()
-    failedAttempts = 0
-    onCodeChanged(code)
-  }
-
-  function cooldownRemainingMs(): number {
-    return Math.max(0, cooldownUntil - now())
-  }
 
   function persist(): void {
     lastPersistedAt = now()
@@ -75,7 +62,7 @@ export function createPairing(args: CreatePairingArgs): Pairing {
       mkdirSync(dataDir, { recursive: true, mode: 0o700 })
       const path = join(dataDir, pairingFileName)
       const temporaryPath = `${path}.${process.pid}.tmp`
-      writeFileSync(temporaryPath, JSON.stringify({ version: 1, tokens: browsers }), { mode: 0o600 })
+      writeFileSync(temporaryPath, JSON.stringify({ version: 2, browsers }), { mode: 0o600 })
       renameSync(temporaryPath, path)
     } catch (error) {
       console.warn(`Could not save paired browsers: ${error instanceof Error ? error.message : String(error)}`)
@@ -89,21 +76,12 @@ export function createPairing(args: CreatePairingArgs): Pairing {
     return changed
   }
 
-  function addBrowser(token: string): void {
-    while (browsers.length >= maxPairedBrowsers) {
-      const oldest = browsers.reduce((least, browser) => (browser.lastUsedAt < least.lastUsedAt ? browser : least))
-      browsers = browsers.filter((browser) => browser !== oldest)
-    }
-    browsers.push({ hash: hashToken(token), createdAt: now(), lastUsedAt: now() })
-    persist()
-  }
-
-  function findBrowser(token: string): PairedBrowser | undefined {
+  function findBrowser(token: string): StoredBrowser | undefined {
     const presented = Buffer.from(hashToken(token), "hex")
-    let match: PairedBrowser | undefined
+    let match: StoredBrowser | undefined
     // No early exit: how long this takes must not depend on which entry matches.
     for (const browser of browsers) {
-      if (timingSafeEqual(presented, Buffer.from(browser.hash, "hex"))) match = browser
+      if (timingSafeEqual(presented, Buffer.from(browser.tokenHash, "hex"))) match = browser
     }
     return match
   }
@@ -114,33 +92,30 @@ export function createPairing(args: CreatePairingArgs): Pairing {
   }
 
   return {
-    currentCode: () => code,
-    cooldownRemainingMs,
     pairedBrowserCount: () => browsers.length,
-    tryPair(candidate) {
-      if (cooldownRemainingMs() > 0) return undefined
-      if (codesMatch(candidate, code)) {
-        const token = randomBytes(32).toString("base64url")
-        addBrowser(token)
-        nextCooldownMs = initialCooldownMs
-        rotateCode()
-        return token
+    issueToken(browser) {
+      const token = randomBytes(32).toString("base64url")
+      while (browsers.length >= maxPairedBrowsers) {
+        const oldest = browsers.reduce((least, candidate) => (candidate.lastUsedAt < least.lastUsedAt ? candidate : least))
+        browsers = browsers.filter((candidate) => candidate !== oldest)
       }
-      failedAttempts += 1
-      if (failedAttempts >= maxFailedAttempts) {
-        cooldownUntil = now() + nextCooldownMs
-        nextCooldownMs = Math.min(nextCooldownMs * 2, maxCooldownMs)
-        rotateCode()
-      }
-      return undefined
+      browsers.push({
+        tokenHash: hashToken(token),
+        origin: browser.origin,
+        mcpOrigin: browser.mcpOrigin,
+        createdAt: now(),
+        lastUsedAt: now(),
+      })
+      persist()
+      return token
     },
-    isValidToken(token) {
+    validateToken(token, origin) {
       if (dropExpired()) persist()
       const browser = findBrowser(token)
-      if (browser === undefined) return false
+      if (browser === undefined || origin !== browser.origin) return undefined
       browser.lastUsedAt = now()
       if (now() - lastPersistedAt >= lastUsedPersistIntervalMs) persist()
-      return true
+      return { origin: browser.origin, mcpOrigin: browser.mcpOrigin }
     },
   }
 }
@@ -150,7 +125,7 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex")
 }
 
-function loadBrowsers(dataDir: string): PairedBrowser[] {
+function loadBrowsers(dataDir: string): StoredBrowser[] {
   const path = join(dataDir, pairingFileName)
   let raw: string
   try {
@@ -167,20 +142,9 @@ function loadBrowsers(dataDir: string): PairedBrowser[] {
     return []
   }
   try {
-    return PairingFileSchema.parse(JSON.parse(raw)).tokens
+    return PairingFileSchema.parse(JSON.parse(raw)).browsers
   } catch {
-    console.warn("Ignoring corrupt pairing.json; all browsers must pair again")
+    console.warn("Ignoring pairing.json: unknown or corrupt format; all browsers must pair again")
     return []
   }
-}
-
-function generateCode(): string {
-  return String(randomInt(0, 1_000_000)).padStart(6, "0")
-}
-
-function codesMatch(candidate: string, expected: string): boolean {
-  const candidateBuffer = Buffer.from(candidate)
-  const expectedBuffer = Buffer.from(expected)
-  if (candidateBuffer.length !== expectedBuffer.length) return false
-  return timingSafeEqual(candidateBuffer, expectedBuffer)
 }

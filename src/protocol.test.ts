@@ -5,55 +5,25 @@ import { ClientMessageSchema } from "./protocol.ts"
 const base = {
   agent: "codex",
   conversationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  prismicToken: "token",
   repository: "repo",
 }
 
-function acceptsUrl(mcpServerUrl: string): boolean {
-  return ClientMessageSchema.safeParse({ type: "chat_open", session: { ...base, mcpServerUrl } }).success
-}
-
-describe("session.mcpServerUrl", () => {
-  it.each([
-    "http://localhost:3030/mcp",
-    "http://127.0.0.1:3030/mcp",
-    "https://pull-2097-mcp.example.com/mcp",
-    "https://example.com/mcp?x=1",
-  ])("accepts %s", (url) => {
-    expect(acceptsUrl(url)).toBe(true)
+describe("session", () => {
+  it("accepts the sessions of chat_open and chat_prompt without any Prismic credential", () => {
+    expect(ClientMessageSchema.safeParse({ type: "chat_open", session: base }).success).toBe(true)
+    expect(ClientMessageSchema.safeParse({ type: "chat_prompt", text: "hi", session: base }).success).toBe(true)
   })
 
-  it.each([
-    "http://user:pass@localhost:3030/mcp",
-    "https://user@example.com/mcp",
-    "https://:secret@example.com/mcp",
-    "http://localhost@evil.example/mcp",
-  ])("rejects credentials in %s", (url) => {
-    expect(acceptsUrl(url)).toBe(false)
-  })
+  it("drops a Prismic token or MCP URL sent by an older browser, so it never reaches the conversation", () => {
+    const legacy = { ...base, prismicToken: "secret-token", mcpServerUrl: "https://example.com/mcp" }
 
-  it.each([
-    "ftp://example.com/mcp",
-    "file:///etc/passwd",
-    "javascript:alert(1)",
-    "ws://localhost:3030/mcp",
-    "wss://example.com/mcp",
-    "data:text/plain,hi",
-    "//example.com/mcp",
-    "example.com/mcp",
-    "",
-  ])("rejects the non-http(s) or malformed URL %j", (url) => {
-    expect(acceptsUrl(url)).toBe(false)
-  })
+    const open = ClientMessageSchema.parse({ type: "chat_open", session: legacy })
+    const prompt = ClientMessageSchema.parse({ type: "chat_prompt", text: "hi", session: legacy })
 
-  it("applies to chat_prompt sessions too", () => {
-    expect(
-      ClientMessageSchema.safeParse({
-        type: "chat_prompt",
-        text: "hi",
-        session: { ...base, mcpServerUrl: "https://user:pass@example.com/mcp" },
-      }).success,
-    ).toBe(false)
+    for (const message of [open, prompt]) {
+      expect(message).toHaveProperty("session")
+      expect("session" in message ? message.session : undefined).toEqual(base)
+    }
   })
 })
 
@@ -89,7 +59,7 @@ describe("session.agent", () => {
   const withAgent = (agent: unknown) =>
     ClientMessageSchema.safeParse({
       type: "chat_open",
-      session: { ...base, agent, mcpServerUrl: "http://localhost:3030/mcp" },
+      session: { ...base, agent },
     }).success
 
   it("is required and must be a known agent", () => {
@@ -108,7 +78,7 @@ describe("session.agent", () => {
       ClientMessageSchema.safeParse({
         type: "chat_prompt",
         text: "hi",
-        session: { ...withoutAgent, mcpServerUrl: "http://localhost:3030/mcp" },
+        session: withoutAgent,
       }).success,
     ).toBe(false)
   })

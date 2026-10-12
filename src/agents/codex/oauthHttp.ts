@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { z } from "zod"
 
 import { errorMessage } from "../../errors.ts"
+import { postForm } from "../../oauthHttp.ts"
 import { discoveryEndpoint, requestTimeoutMs, resource } from "./oauth.ts"
 
 const ModelsResponseSchema = z.object({
@@ -52,27 +53,6 @@ export async function logAvailableModels(accessToken: string | undefined): Promi
   } catch (error) {
     console.warn(`Could not list ChatGPT plan models: ${errorMessage(error)}`)
   }
-}
-
-export function postForm(url: string, fields: Record<string, string>): Promise<Response> {
-  return fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams(fields),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  })
-}
-
-export async function readErrorCode(response: Response): Promise<string | undefined> {
-  const body: unknown = await response.json().catch(() => undefined)
-  if (typeof body !== "object" || body === null) return undefined
-  const error = (body as { error?: unknown }).error
-  if (typeof error === "string") return error
-  if (typeof error === "object" && error !== null) {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === "string") return code
-  }
-  return undefined
 }
 
 export function openBrowser(url: string): void {

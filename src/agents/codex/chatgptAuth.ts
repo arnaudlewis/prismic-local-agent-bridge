@@ -5,13 +5,13 @@ import { createRemoteJWKSet, jwtVerify } from "jose"
 import { z } from "zod"
 
 import { errorMessage } from "../../errors.ts"
+import { classifyRefreshFailure, postForm, readErrorCode } from "../../oauthHttp.ts"
 import type { ChatGptStatus } from "../../protocol.ts"
 import { hasPlanUsageScope, loadCredentials, loadHostId } from "./credentialsFile.ts"
 import type { Credentials } from "./credentialsFile.ts"
 import {
   attemptTtlMs,
   buildAuthorizationUrl,
-  classifyRefreshFailure,
   issuer,
   jwksEndpoint,
   redactAuthorizationUrl,
@@ -19,7 +19,7 @@ import {
   scopes,
   tokenEndpoint,
 } from "./oauth.ts"
-import { logAvailableModels, openBrowser, postForm, readErrorCode, revokeRefreshToken } from "./oauthHttp.ts"
+import { logAvailableModels, openBrowser, revokeRefreshToken } from "./oauthHttp.ts"
 
 export type ChatGptAuthErrorCode = "signed_out" | "plan_usage_disabled" | "refresh_failed"
 

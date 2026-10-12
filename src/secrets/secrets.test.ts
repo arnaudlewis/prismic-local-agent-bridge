@@ -222,6 +222,7 @@ describe("default secret store", () => {
     const { store } = await createDefaultSecretStores({
       dataDir,
       name: "claude-api-key",
+      label: "Anthropic API key",
       keychainEntry: fakeEntry({
         setPassword: () => {
           throw new Error("no keychain")
@@ -235,7 +236,12 @@ describe("default secret store", () => {
   })
 
   it("uses the keychain when it works", async () => {
-    const { store, otherStores } = await createDefaultSecretStores({ dataDir: tempDir(), name: "k", keychainEntry: fakeEntry() })
+    const { store, otherStores } = await createDefaultSecretStores({
+      dataDir: tempDir(),
+      name: "k",
+      label: "Anthropic API key",
+      keychainEntry: fakeEntry(),
+    })
 
     expect(store.backend).toBe("keychain")
     expect(otherStores.map((other) => other.backend)).toEqual(["file"])

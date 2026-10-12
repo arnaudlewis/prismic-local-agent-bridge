@@ -32,7 +32,7 @@ export async function handleChatPrompt(
     return
   }
   setStatus(ctx, conversation, "starting")
-  const ready = await ensureAgent(ctx, conversation, windowId, message.session)
+  const ready = await ensureAgent(ctx, conversation, windowId)
   if (!ready) return
   const agent = conversation.process
   if (agent === undefined) {
@@ -71,7 +71,7 @@ export async function handleChatPrompt(
   try {
     const contextBlock =
       isRegularPrompt && ctx.config.readContextEachTurn
-        ? await readTurnContext(ctx, { conversation, agent, session: message.session, generation })
+        ? await readTurnContext(ctx, { conversation, agent, generation })
         : undefined
     if (conversation.generation !== generation || conversation.process !== agent) return
     if (agent.cancelRequested) {

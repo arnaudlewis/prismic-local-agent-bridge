@@ -8,8 +8,9 @@ import type { Transcript } from "../transcript.ts"
 export interface StartedWith {
   // Changes with the agent's credentials: a running agent started with another one is restarted.
   credentialsFingerprint: string
-  mcpServerUrl: string
-  prismicToken: string
+  // The Prismic MCP origin and user the agent works as: another one restarts it.
+  mcpOrigin: string
+  prismicUserId: string
   // The MCP header X-Prismic-Window-Id must follow the attached window, so a new window restarts the agent.
   windowId: string
 }
@@ -26,6 +27,8 @@ export interface AgentFields {
   connection: ClientSideConnection
   sessionId: string
   startedWith: StartedWith
+  // The token this process uses to reach the daemon's MCP proxy; revoked when the process is stopped.
+  grantToken: string
   turnActive: boolean
   turnStartedAt: number
   // Set when a detached turn went over its limit and was cancelled; if it still hasn't ended, the agent is stopped.

@@ -9,7 +9,7 @@ import { browserWindowId } from "../channelKey.ts"
 import type { AgentCredentials, AgentProvider } from "../agents/provider.ts"
 import { errorMessage } from "../errors.ts"
 import { bridgeInfo } from "../protocol.ts"
-import type { Session } from "../protocol.ts"
+import { agentMcpPath } from "../prismic/agentMcpProxy.ts"
 import { buildChildEnvironment } from "./childEnv.ts"
 import { providerOf } from "./context.ts"
 import type { Context } from "./context.ts"
@@ -23,14 +23,16 @@ import { cancelPendingPermissions, stopAgent, waitForExit } from "./stop.ts"
 import type { AgentFields, Conversation, StartedWith } from "./types.ts"
 
 const tooManyConversationsNotice = "Too many active conversations. Finish or reset one first."
+const notConnectedNotice = "This window isn't connected. Connect again from the agent panel."
+const signInNotice = "Sign in to Prismic again from the agent panel."
 
 class StartAbortedError extends Error {}
 
-// Makes sure the conversation has a running agent started with the current credentials, MCP URL, token and window.
+// Makes sure the conversation has a running agent started with the current credentials, Prismic account and window.
 // Calls are serialized per conversation. Returns false (after telling the user why) when it can't.
-export function ensureAgent(ctx: Context, conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
+export function ensureAgent(ctx: Context, conversation: Conversation, windowId: string): Promise<boolean> {
   const next = (conversation.ensuring ?? Promise.resolve(true)).then(() =>
-    doEnsureAgent(ctx, conversation, windowId, session),
+    doEnsureAgent(ctx, conversation, windowId),
   )
   conversation.ensuring = next
   return next.finally(() => {
@@ -43,9 +45,9 @@ type EnsureOutcome = "ready" | "failed" | "abandoned" | "stale"
 // Credentials can change while an agent is getting ready (a key replaced or removed). Each attempt notices that and
 // gives up on its stale credentials; the second attempt authenticates again, which either gets the new key or tells
 // the user there is none. A second staleness is a user flapping the key: the start is abandoned.
-async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId: string, session: Session): Promise<boolean> {
+async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId: string): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const outcome = await tryEnsureAgent(ctx, conversation, windowId, session)
+    const outcome = await tryEnsureAgent(ctx, conversation, windowId)
     if (outcome === "ready") return true
     if (outcome !== "stale") return false
   }
@@ -54,9 +56,22 @@ async function doEnsureAgent(ctx: Context, conversation: Conversation, windowId:
 
 class StaleCredentialsError extends Error {}
 
-async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId: string, session: Session): Promise<EnsureOutcome> {
+async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId: string): Promise<EnsureOutcome> {
   // Everything below awaits something; a delete in the meantime must not leave notices or an agent behind.
   const entryGeneration = conversation.generation
+  // Without a pairing there is no MCP to reach, and without a Prismic sign-in the proxy has nothing to swap in.
+  const mcpOrigin = ctx.channels.mcpOrigin(windowId)
+  if (mcpOrigin === undefined) {
+    notify(ctx, conversation, "error", notConnectedNotice)
+    setStatus(ctx, conversation, "idle")
+    return "failed"
+  }
+  const prismic = ctx.prismic.auth.status(mcpOrigin)
+  if (prismic.status === "signed_out") {
+    notify(ctx, conversation, "error", signInNotice)
+    setStatus(ctx, conversation, "idle")
+    return "failed"
+  }
   let provider: AgentProvider
   let credentials: AgentCredentials
   try {
@@ -75,8 +90,8 @@ async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId
 
   const startedWith: StartedWith = {
     credentialsFingerprint: credentials.fingerprint,
-    mcpServerUrl: session.mcpServerUrl,
-    prismicToken: session.prismicToken,
+    mcpOrigin,
+    prismicUserId: prismic.userId,
     windowId,
   }
   const current = conversation.process
@@ -99,7 +114,7 @@ async function tryEnsureAgent(ctx: Context, conversation: Conversation, windowId
   // Set in the same tick as the cap check above, so concurrent starts can't all pass it.
   conversation.starting = true
   try {
-    await startAgent({ ctx, conversation, windowId, session, credentials, startedWith, isStale })
+    await startAgent({ ctx, conversation, windowId, credentials, startedWith, isStale })
     return "ready"
   } catch (error) {
     if (error instanceof StaleCredentialsError) return "stale"
@@ -129,7 +144,6 @@ interface StartAgentArgs {
   ctx: Context
   conversation: Conversation
   windowId: string
-  session: Session
   credentials: AgentCredentials
   startedWith: StartedWith
   // True once the credentials were replaced or removed since they were read.
@@ -138,7 +152,7 @@ interface StartAgentArgs {
 
 // Spawns the ACP child, does the handshake, then resumes the stored session (or starts a new one).
 async function startAgent(args: StartAgentArgs): Promise<void> {
-  const { ctx, conversation, windowId, session, credentials, startedWith, isStale } = args
+  const { ctx, conversation, windowId, credentials, startedWith, isStale } = args
   const provider = providerOf(ctx, conversation)
   const { projectDir } = ctx.config
   const generation = conversation.generation
@@ -157,6 +171,10 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       caseInsensitive: process.platform === "win32",
     }),
   })
+  // The agent reaches the Prismic MCP through the daemon, with a token of its own that is worth nothing elsewhere.
+  const grantToken = ctx.prismic.grants.issue({ mcpOrigin: startedWith.mcpOrigin, windowKey: windowId })
+  // Whatever the generation: a process that is gone must not leave a working token behind.
+  child.on("exit", () => ctx.prismic.grants.revoke(grantToken))
   conversation.startingChild = child
   child.on("error", (error) => console.error(`Local agent process error: ${error.message}`))
   child.stdin.on("error", (error) => console.warn(`Local agent stdin error: ${error.message}`))
@@ -183,6 +201,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     connection,
     sessionId: "",
     startedWith,
+    grantToken,
     turnActive: false,
     turnStartedAt: 0,
     cancelRequestedAt: undefined,
@@ -212,9 +231,9 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       {
         type: "http",
         name: "prismic",
-        url: session.mcpServerUrl,
+        url: `http://127.0.0.1:${ctx.prismic.bridgePort}${agentMcpPath}`,
         headers: [
-          { name: "Authorization", value: `Bearer ${session.prismicToken}` },
+          { name: "Authorization", value: `Bearer ${grantToken}` },
           { name: "X-Prismic-Window-Id", value: browserWindowId(windowId) },
         ],
       },
@@ -292,8 +311,8 @@ function handleAgentExit(ctx: Context, conversation: Conversation, child: ChildP
 function sameStartedWith(a: StartedWith, b: StartedWith): boolean {
   return (
     a.credentialsFingerprint === b.credentialsFingerprint &&
-    a.mcpServerUrl === b.mcpServerUrl &&
-    a.prismicToken === b.prismicToken &&
+    a.mcpOrigin === b.mcpOrigin &&
+    a.prismicUserId === b.prismicUserId &&
     a.windowId === b.windowId
   )
 }

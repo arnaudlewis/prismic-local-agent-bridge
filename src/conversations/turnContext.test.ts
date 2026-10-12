@@ -23,13 +23,10 @@ describe("per-turn editor context read", () => {
       readEditorContext: true,
       contextReadTimeoutMs: initial.contextReadTimeoutMs ?? 2000,
       dataDir: initial.dataDir,
+      mcpOrigin: new URL(stub.url).origin,
+      prismicAccessToken: secretToken,
     })
-    const stubSession: Session = {
-      ...session,
-      mcpServerUrl: stub.url,
-      prismicToken: secretToken,
-      document: { id: "DOC1", title: "Home" },
-    }
+    const stubSession: Session = { ...session, document: { id: "DOC1", title: "Home" } }
     await harness.agents.handleMessage(windowA, { type: "chat_open", session: stubSession })
     return { stub, harness, stubSession }
   }
@@ -208,9 +205,9 @@ describe("per-turn editor context read", () => {
   })
 
   it.each([
-    ["unauthorized", "unauthorized"],
     ["not JSON", "garbage"],
     ["an oversized body", "huge"],
+    // The upstream helper refuses redirects, so this is a failed request: nothing is followed to another host.
     ["a redirect", "redirect"],
   ] as const)("continues the turn without context on %s, with one quiet notice", async (_name, mode) => {
     const { stub, harness, stubSession } = await setup({ mode })
@@ -226,6 +223,22 @@ describe("per-turn editor context read", () => {
     const second = await prompt(harness, stubSession, "two")
     expect(notices(second.events)).toEqual([])
     expect(second.blocks).toEqual(["two"])
+    expect(stub.elsewhereHits).toBe(0)
+  })
+
+  it("continues the turn without context when the server rejects the token twice, and asks to sign in again from the next prompt", async () => {
+    const { stub, harness, stubSession } = await setup({ mode: "unauthorized" })
+
+    const first = await prompt(harness, stubSession, "one")
+    expect(contextBlockOf(first.blocks)).toBeUndefined()
+    expect(first.events.some((event) => event.type === "turn_end")).toBe(true)
+    expect(notices(first.events)).toEqual(["Couldn't read the editor context this turn."])
+
+    // Two rejections signed the daemon out of Prismic: no agent turn runs on an account the server refuses.
+    const second = await prompt(harness, stubSession, "two")
+    expect(notices(second.events)).toEqual(["Sign in to Prismic again from the agent panel."])
+    expect(second.blocks).toEqual([])
+    expect(stub.requests).toHaveLength(2)
     expect(stub.elsewhereHits).toBe(0)
   })
 
@@ -298,7 +311,13 @@ describe("per-turn editor context read", () => {
     await prompt(first.harness, first.stubSession, "one")
     first.harness.agents.stopAll()
 
-    const second = createHarness({ readEditorContext: true, contextReadTimeoutMs: 2000, dataDir: first.harness.dataDir })
+    const second = createHarness({
+      readEditorContext: true,
+      contextReadTimeoutMs: 2000,
+      dataDir: first.harness.dataDir,
+      mcpOrigin: new URL(first.stub.url).origin,
+      prismicAccessToken: secretToken,
+    })
     const withoutDocument: Session = { ...first.stubSession, document: undefined }
     await second.agents.handleMessage(windowB, { type: "chat_open", session: withoutDocument })
     first.stub.requests.length = 0

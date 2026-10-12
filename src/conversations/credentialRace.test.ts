@@ -47,6 +47,7 @@ function setup(stored: string | undefined = keyA) {
       req: {} as never,
       res: { writeHead: () => {}, end: () => {} } as never,
       url: new URL("http://x/"),
+      paired: undefined,
     })
   return { harness, vault, store, provider, removeKey }
 }

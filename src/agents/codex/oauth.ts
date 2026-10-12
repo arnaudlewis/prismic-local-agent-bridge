@@ -1,3 +1,5 @@
+import { defaultRequestTimeoutMs } from "../../oauthHttp.ts"
+
 // The OAuth pieces of "Sign in with ChatGPT" that don't touch the disk or the network.
 
 export const issuer = "https://auth.openai.com"
@@ -11,7 +13,7 @@ export const planUsageScope = "chatgpt.tokens.use.direct"
 const agentNameHint = "Prismic Local Agent"
 const dynamicClientId = "dynamic_agent_client"
 export const attemptTtlMs = 10 * 60 * 1000
-export const requestTimeoutMs = 15_000
+export const requestTimeoutMs = defaultRequestTimeoutMs
 
 interface BuildAuthorizationUrlArgs {
   clientId?: string
@@ -54,25 +56,4 @@ export function redactAuthorizationUrl(authorizationUrl: string): string {
   url.searchParams.delete("id_token_hint")
   url.searchParams.delete("login_hint")
   return url.href
-}
-
-interface ClassifyRefreshFailureArgs {
-  status: number
-  errorCode: string | undefined
-}
-
-export function classifyRefreshFailure(args: ClassifyRefreshFailureArgs): "terminal" | "invalid_client" | "transient" {
-  switch (args.errorCode) {
-    case "invalid_grant":
-    case "invalid_refresh_token":
-    case "token_expired":
-    case "refresh_token_expired":
-    case "refresh_token_invalidated":
-    case "refresh_token_reused":
-      return "terminal"
-    case "invalid_client":
-      return "invalid_client"
-    default:
-      return "transient"
-  }
 }

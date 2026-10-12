@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { readRpcResponse } from "./editorContextClient.ts"
+import { readEditorContext, readRpcResponse } from "./editorContextClient.ts"
+import { createMcpUpstream } from "./prismic/mcpUpstream.ts"
+import { createFakePrismic } from "./testing/fakePrismic.ts"
+import { secretToken, startStub } from "./testing/mcpStub.ts"
+import type { Stub, StubMode } from "./testing/mcpStub.ts"
 
 const encoder = new TextEncoder()
 
@@ -102,5 +106,67 @@ describe("readRpcResponse on an event stream", () => {
     const response = new Response(JSON.stringify(answer), { headers: { "Content-Type": "application/json" } })
 
     expect(await readRpcResponse(response, false)).toEqual(answer)
+  })
+})
+
+describe("readEditorContext", () => {
+  const stubs: Stub[] = []
+
+  afterEach(async () => {
+    for (const stub of stubs.splice(0)) await stub.close()
+  })
+
+  async function read(mode: StubMode, args: { timeoutMs?: number; pinnedDocumentId?: string } = {}) {
+    const stub = await startStub({ mode })
+    stubs.push(stub)
+    const prismic = createFakePrismic({ accessToken: secretToken })
+    const outcome = await readEditorContext({
+      upstream: createMcpUpstream({ auth: prismic.auth }),
+      mcpOrigin: new URL(stub.url).origin,
+      windowId: "window-1",
+      pinnedDocumentId: args.pinnedDocumentId,
+      timeoutMs: args.timeoutMs,
+    })
+    return { stub, outcome }
+  }
+
+  it("calls get_editor_context for the window with the daemon's access token and returns the tool's JSON", async () => {
+    const { stub, outcome } = await read("json", { pinnedDocumentId: "DOC1" })
+
+    expect(outcome).toEqual({ ok: true, value: stub.payload })
+    expect(stub.requests).toHaveLength(1)
+    expect(stub.requests[0]?.headers.authorization).toBe(`Bearer ${secretToken}`)
+    expect(stub.requests[0]?.headers["x-prismic-window-id"]).toBe("window-1")
+    expect(stub.requests[0]?.body).toMatchObject({
+      method: "tools/call",
+      params: { name: "get_editor_context", arguments: { pinnedDocumentId: "DOC1" } },
+    })
+  })
+
+  it("reads an event-stream answer as well", async () => {
+    const { stub, outcome } = await read("sse")
+
+    expect(outcome).toEqual({ ok: true, value: stub.payload })
+  })
+
+  // The reasons are fixed categories: they end up in the daemon's logs, so no origin or token may leak into them.
+  it.each([
+    ["unauthorized", "sign-in required"],
+    ["garbage", "invalid response"],
+    ["huge", "response too large"],
+    ["redirect", "network error"],
+  ] as const)("reports %s as %j without following a redirect or leaking anything", async (mode, reason) => {
+    const { stub, outcome } = await read(mode)
+
+    expect(outcome).toEqual({ ok: false, reason })
+    expect(JSON.stringify(outcome)).not.toContain(secretToken)
+    expect(JSON.stringify(outcome)).not.toContain("127.0.0.1")
+    expect(stub.elsewhereHits).toBe(0)
+  })
+
+  it("gives up on a server that never answers once the timeout passed", async () => {
+    const { outcome } = await read("hang", { timeoutMs: 150 })
+
+    expect(outcome).toEqual({ ok: false, reason: "timeout" })
   })
 })

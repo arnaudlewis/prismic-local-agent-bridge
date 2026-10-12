@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 
+import { isAllowedEditorOrigin } from "./prismic/editorOrigins.ts"
+
 export class HttpError extends Error {
   status: number
 
@@ -14,10 +16,10 @@ export function isAllowedHost(req: IncomingMessage, port: number): boolean {
   return host === `127.0.0.1:${port}` || host === `localhost:${port}`
 }
 
-export function getAllowedOrigin(req: IncomingMessage, allowedOrigins: string[]): string | undefined {
+export function getAllowedOrigin(req: IncomingMessage, extraOrigins: readonly string[]): string | undefined {
   const origin = req.headers.origin
   if (origin === undefined) return undefined
-  return allowedOrigins.includes(origin) ? origin : undefined
+  return isAllowedEditorOrigin(origin, extraOrigins) ? origin : undefined
 }
 
 export function applyCors(res: ServerResponse, origin: string | undefined): void {
@@ -26,7 +28,7 @@ export function applyCors(res: ServerResponse, origin: string | undefined): void
   res.setHeader("Vary", "Origin")
 }
 
-export async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
+export async function readRawBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<Buffer> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
@@ -35,11 +37,21 @@ export async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): 
     if (size > maxBytes) throw new HttpError(413, "payload_too_large")
     chunks.push(buffer)
   }
+  return Buffer.concat(chunks)
+}
+
+export async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise<unknown> {
+  const raw = await readRawBody(req, maxBytes)
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"))
+    return JSON.parse(raw.toString("utf8"))
   } catch {
     throw new HttpError(400, "invalid_json")
   }
+}
+
+// An application/x-www-form-urlencoded body, for the HTML forms the daemon serves itself.
+export async function readFormBody(req: IncomingMessage, maxBytes = 4096): Promise<URLSearchParams> {
+  return new URLSearchParams((await readRawBody(req, maxBytes)).toString("utf8"))
 }
 
 export function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -60,7 +72,7 @@ export function getBearerToken(req: IncomingMessage): string | undefined {
   return match?.[1]
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")

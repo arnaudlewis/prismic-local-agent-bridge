@@ -6,8 +6,9 @@ import {
   defaultIdleTtlMs,
   defaultMaxConversations,
   defaultMaxLiveAgents,
+  knownSecrets,
 } from "./conversations/context.ts"
-import type { Context } from "./conversations/context.ts"
+import type { Context, PrismicRuntime } from "./conversations/context.ts"
 import { sendLive, sendToWindow } from "./conversations/output.ts"
 import { handlePermissionResponse } from "./conversations/permissions.ts"
 import { detachWindow, stopProviderAgents, sweepDetachedConversations } from "./conversations/registry.ts"
@@ -39,6 +40,8 @@ export interface CreateAgentSessionsArgs {
   contextReadTimeoutMs?: number
   // Daemon environment variables handed to the agents on top of the allowlist (--pass-env).
   passEnv?: string[]
+  // The daemon's Prismic sign-in and what is built on it (the agents' MCP proxy, the context read).
+  prismic: PrismicRuntime
 }
 
 export interface AgentSessions {
@@ -51,8 +54,8 @@ export interface AgentSessions {
 // The conversation machinery behind the WebSocket: routes each client message to its handler. The modules in
 // src/conversations hold the logic; this only wires them to the window channels and the lifetime timers.
 export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSessions {
-  const secrets = () => args.providers.flatMap((provider) => provider.secretValues?.() ?? [])
-  const store = createConversationStore({ dataDir: args.dataDir, sanitize: (value) => redactDeep(value, secrets()) })
+  // The store is created first but only calls this once ctx exists: it must see every secret the daemon knows.
+  const store = createConversationStore({ dataDir: args.dataDir, sanitize: (value) => redactDeep(value, knownSecrets(ctx)) })
   const ctx: Context = {
     channels: args.channels,
     store,
@@ -72,6 +75,7 @@ export function createAgentSessions(args: CreateAgentSessionsArgs): AgentSession
     windowScopes: new Map(),
     redactors: new Map(),
     activity: { tick: 0 },
+    prismic: args.prismic,
   }
 
   try {

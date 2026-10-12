@@ -69,7 +69,8 @@ describe("preferredConfig", () => {
     await harness.agents.handleMessage(windowId, { type: "chat_open", session })
     await harness.agents.handleMessage(windowId, { type: "set_config_option", configId: "mode", value: "agent" })
 
-    await harness.agents.handleMessage(windowId, { type: "chat_open", session: { ...session, prismicToken: "other" } })
+    harness.prismic.setUserId("other")
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
     expect(harness.lastMode()?.currentValue).toBe("agent")
 
     await harness.agents.handleMessage(windowId, {
@@ -108,7 +109,8 @@ describe("collaboration mode", () => {
     expect(notices(harness.events)).toEqual([])
     expect(lastOption(harness, "collaboration_mode")?.currentValue).toBe("plan")
 
-    await harness.agents.handleMessage(windowId, { type: "chat_open", session: { ...session, prismicToken: "other" } })
+    harness.prismic.setUserId("other")
+    await harness.agents.handleMessage(windowId, { type: "chat_open", session })
     expect(lastOption(harness, "collaboration_mode")?.currentValue).toBe("plan")
 
     await harness.agents.handleMessage(windowId, {

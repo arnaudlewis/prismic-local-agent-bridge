@@ -31,9 +31,10 @@ class FakeSocket extends EventEmitter {
 function attach(
   channels: ReturnType<typeof createWindowChannels>,
   isAuthorized: () => boolean = () => true,
+  mcpOrigin = "https://mcp.prismic.io",
 ): FakeSocket {
   const socket = new FakeSocket()
-  channels.attach(windowId, socket as unknown as WebSocket, isAuthorized)
+  channels.attach(windowId, socket as unknown as WebSocket, { isAuthorized, mcpOrigin })
   return socket
 }
 
@@ -131,6 +132,28 @@ describe("createWindowChannels", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it("knows the MCP origin of the window's socket while it is attached, and forgets it once the socket closed", () => {
+    const channels = createWindowChannels()
+    expect(channels.mcpOrigin(windowId)).toBeUndefined()
+
+    const socket = attach(channels, () => true, "https://mcp.wroom.io")
+    expect(channels.mcpOrigin(windowId)).toBe("https://mcp.wroom.io")
+    expect(channels.mcpOrigin("22222222-2222-4222-8222-222222222222")).toBeUndefined()
+
+    socket.emit("close")
+    expect(channels.mcpOrigin(windowId)).toBeUndefined()
+  })
+
+  it("answers with the MCP origin of the replacing socket, also when the replaced one closes late", () => {
+    const channels = createWindowChannels()
+    const oldSocket = attach(channels, () => true, "https://mcp.prismic.io")
+    attach(channels, () => true, "http://localhost:4000")
+
+    expect(channels.mcpOrigin(windowId)).toBe("http://localhost:4000")
+    oldSocket.emit("close")
+    expect(channels.mcpOrigin(windowId)).toBe("http://localhost:4000")
   })
 
   it("stops re-checking a socket that was replaced or closed", () => {

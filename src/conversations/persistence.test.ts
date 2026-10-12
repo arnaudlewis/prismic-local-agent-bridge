@@ -275,7 +275,7 @@ describe("persistent conversations", () => {
 })
 
 describe("conversationId validation", () => {
-  const base = { agent: "codex", mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
+  const base = { agent: "codex", repository: "repo" }
 
   it.each([
     "../../etc/passwd",
@@ -306,12 +306,10 @@ describe("conversationId validation", () => {
 })
 
 describe("input bounds", () => {
-  const base = { agent: "codex", conversationId, mcpServerUrl: "http://localhost:3030/mcp", prismicToken: "token", repository: "repo" }
+  const base = { agent: "codex", conversationId, repository: "repo" }
 
   it.each([
     ["repository", { ...base, repository: "r".repeat(201) }],
-    ["mcpServerUrl", { ...base, mcpServerUrl: `http://localhost/${"a".repeat(2100)}` }],
-    ["prismicToken", { ...base, prismicToken: "t".repeat(8193) }],
     ["document id", { ...base, document: { id: "i".repeat(301), title: "t" } }],
     ["document title", { ...base, document: { id: "i", title: "t".repeat(301) } }],
   ])("rejects an oversized session %s", (_name, oversized) => {
@@ -319,7 +317,7 @@ describe("input bounds", () => {
   })
 
   it("accepts values at the limits", () => {
-    const atLimits = { ...base, repository: "r".repeat(200), prismicToken: "t".repeat(8192), document: { id: "i".repeat(300), title: "t".repeat(300) } }
+    const atLimits = { ...base, repository: "r".repeat(200), document: { id: "i".repeat(300), title: "t".repeat(300) } }
     expect(ClientMessageSchema.safeParse({ type: "chat_open", session: atLimits }).success).toBe(true)
   })
 

@@ -41,7 +41,12 @@ function createKeychain() {
 
 // One "run of the daemon": the stores it would build, and the vault over them.
 async function run(dataDir: string, keychain: ReturnType<typeof createKeychain>) {
-  const stores = await createDefaultSecretStores({ dataDir, name: "claude-api-key", keychainEntry: keychain.factory })
+  const stores = await createDefaultSecretStores({
+    dataDir,
+    name: "claude-api-key",
+    label: "Anthropic API key",
+    keychainEntry: keychain.factory,
+  })
   const vault = createApiKeyVault({ ...stores, env: () => undefined })
   return { vault, backend: stores.store.backend, file: createFileSecretStore({ dataDir, name: "claude-api-key" }) }
 }
@@ -161,7 +166,7 @@ describe("a key and the backends it can live in", () => {
       expect(third.backend).toBe("keychain")
       expect(keychain.content()).toEqual([])
       expect(await third.vault.get()).toBeUndefined()
-      expect(existsSync(join(dataDir, "secrets", "keychain-cleanup-pending"))).toBe(false)
+      expect(existsSync(join(dataDir, "secrets", "claude-api-key.keychain-cleanup-pending"))).toBe(false)
     })
 
     it("does not bring back a key that was replaced while the keychain was away", async () => {
@@ -193,7 +198,12 @@ describe("a key and the backends it can live in", () => {
       const { vault } = await run(dataDir, keychain)
       await vault.set(keyA)
       keychain.setFailDelete(true)
-      const stores = await createDefaultSecretStores({ dataDir, name: "claude-api-key", keychainEntry: keychain.factory })
+      const stores = await createDefaultSecretStores({
+        dataDir,
+        name: "claude-api-key",
+        label: "Anthropic API key",
+        keychainEntry: keychain.factory,
+      })
       const withBrokenKeychain = createApiKeyVault({ store: createFileSecretStore({ dataDir, name: "claude-api-key" }), otherStores: [stores.store] })
 
       await withBrokenKeychain.set(keyB)
@@ -289,7 +299,7 @@ describe("a key and the backends it can live in", () => {
       const dataDir = mkdtempSync(join(tmpdir(), "bridge-backends-"))
       const log = quiet()
       // A directory where the marker file would be: it exists, and it can't be removed like a file.
-      mkdirSync(join(dataDir, "secrets", "keychain-cleanup-pending", "inside"), { recursive: true })
+      mkdirSync(join(dataDir, "secrets", "claude-api-key.keychain-cleanup-pending", "inside"), { recursive: true })
       const first = createFileSecretStore({ dataDir, name: "claude-api-key" })
       await first.set(keyA)
 
@@ -305,7 +315,12 @@ describe("a key and the backends it can live in", () => {
       keychain.setAvailable(false)
       const dataDir = mkdtempSync(join(tmpdir(), "bridge-backends-"))
       const log = quiet()
-      const stores = await createDefaultSecretStores({ dataDir, name: "claude-api-key", keychainEntry: keychain.factory })
+      const stores = await createDefaultSecretStores({
+        dataDir,
+        name: "claude-api-key",
+        label: "Anthropic API key",
+        keychainEntry: keychain.factory,
+      })
       const failing: RevocationMarker = {
         isSet: () => false,
         record() {
@@ -333,7 +348,7 @@ describe("a key and the backends it can live in", () => {
       await vault.set(keyA)
 
       log.restore()
-      expect(existsSync(join(dataDir, "secrets", "keychain-cleanup-pending"))).toBe(true)
+      expect(existsSync(join(dataDir, "secrets", "claude-api-key.keychain-cleanup-pending"))).toBe(true)
     })
   })
 

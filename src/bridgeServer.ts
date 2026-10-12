@@ -2,19 +2,18 @@ import { createServer } from "node:http"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { Duplex } from "node:stream"
 import { WebSocketServer } from "ws"
-import { z } from "zod"
 
-import type { AgentProvider } from "./agents/provider.ts"
+import type { AgentProvider, ProviderRoute } from "./agents/provider.ts"
 import {
   HttpError,
   applyCors,
   getAllowedOrigin,
   getBearerToken,
   isAllowedHost,
-  readJsonBody,
   sendJson,
 } from "./httpUtils.ts"
-import type { Pairing } from "./pairing.ts"
+import type { PairedBrowser, Pairing } from "./pairing.ts"
+import type { PrismicAuth } from "./prismic/prismicAuth.ts"
 import { channelKey } from "./channelKey.ts"
 import { AgentIdSchema, bridgeInfo, windowIdPattern } from "./protocol.ts"
 import type { StatusResponse } from "./protocol.ts"
@@ -24,15 +23,17 @@ const windowPathPattern = new RegExp(`^/windows/(${windowIdPattern.source.slice(
 
 const maxWebSocketPayloadBytes = 256 * 1024
 
-const PairBodySchema = z.object({ code: z.string() })
-
 interface StartBridgeServerArgs {
   port: number
-  allowedOrigins: string[]
+  // Browser origins allowed on top of the deployed editors' (see src/prismic/editorOrigins.ts).
+  extraOrigins: string[]
   projectDir: string
   // The agents of this daemon: their status and their own HTTP routes (sign-in flows) are served here.
   providers: AgentProvider[]
+  // The routes that are not an agent's: the connect popup, the editor context, the agents' MCP proxy.
+  routes: ProviderRoute[]
   pairing: Pairing
+  prismicAuth: PrismicAuth
   channels: WindowChannels
 }
 
@@ -41,8 +42,8 @@ export interface BridgeServer {
 }
 
 export async function startBridgeServer(args: StartBridgeServerArgs): Promise<BridgeServer> {
-  const { port, allowedOrigins, projectDir, providers, pairing, channels } = args
-  const providerRoutes = providers.flatMap((provider) => provider.routes?.() ?? [])
+  const { port, extraOrigins, projectDir, providers, routes, pairing, prismicAuth, channels } = args
+  const customRoutes = [...routes, ...providers.flatMap((provider) => provider.routes?.() ?? [])]
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!isAllowedHost(req, port)) throw new HttpError(403, "Forbidden host")
@@ -50,10 +51,10 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     const url = parseOriginFormUrl(req.url, port)
     if (url === undefined) throw new HttpError(400, "bad_request")
     const method = req.method ?? "GET"
-    const providerRoute = providerRoutes.find((route) => route.method === method && route.path === url.pathname)
+    const customRoute = customRoutes.find((candidate) => candidate.method === method && matchesPath(candidate, url.pathname))
 
-    const allowedOrigin = getAllowedOrigin(req, allowedOrigins)
-    if (req.headers.origin !== undefined && allowedOrigin === undefined && providerRoute?.originExempt !== true) {
+    const allowedOrigin = getAllowedOrigin(req, extraOrigins)
+    if (req.headers.origin !== undefined && allowedOrigin === undefined && customRoute?.originExempt !== true) {
       throw new HttpError(403, "Forbidden origin")
     }
     applyCors(res, allowedOrigin)
@@ -61,7 +62,7 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
     if (method === "OPTIONS") {
       res.writeHead(204, {
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Prismic-User-Id",
         "Access-Control-Allow-Private-Network": "true",
         "Access-Control-Max-Age": "600",
       })
@@ -74,32 +75,26 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
       return
     }
 
-    if (method === "POST" && url.pathname === "/pair") {
-      const retryAfterMs = pairing.cooldownRemainingMs()
-      if (retryAfterMs > 0) {
-        res.setHeader("Retry-After", String(Math.ceil(retryAfterMs / 1000)))
-        throw new HttpError(429, "too_many_attempts")
-      }
-      const body = PairBodySchema.safeParse(await readJsonBody(req))
-      if (!body.success) throw new HttpError(400, "invalid_request")
-      const token = pairing.tryPair(body.data.code)
-      if (token === undefined) throw new HttpError(401, "invalid_code")
-      sendJson(res, 200, { token })
-      return
-    }
-
-    if (providerRoute !== undefined) {
-      if (providerRoute.auth === "bearer") requireToken(req, pairing)
-      await providerRoute.handle({ req, res, url })
+    if (customRoute !== undefined) {
+      const paired = customRoute.auth === "bearer" ? requireToken(req, pairing) : undefined
+      await customRoute.handle({ req, res, url, paired })
       return
     }
 
     if (method === "GET" && url.pathname === "/status") {
-      requireToken(req, pairing)
+      const paired = requireToken(req, pairing)
       const agents: StatusResponse["agents"] = {}
       for (const provider of providers) agents[provider.id] = await provider.getStatus()
-      const status: StatusResponse = { projectDir, agents }
+      const status: StatusResponse = { projectDir, agents, prismic: prismicAuth.status(paired.mcpOrigin) }
       sendJson(res, 200, status)
+      return
+    }
+
+    if (method === "POST" && url.pathname === "/prismic/sign-out") {
+      const paired = requireToken(req, pairing)
+      await prismicAuth.signOut(paired.mcpOrigin)
+      res.writeHead(204)
+      res.end()
       return
     }
 
@@ -127,7 +122,8 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   server.on("upgrade", (req, socket, head) => {
     socket.on("error", () => socket.destroy())
     if (!isAllowedHost(req, port)) return rejectUpgrade(socket, 403, "Forbidden")
-    if (getAllowedOrigin(req, allowedOrigins) === undefined) return rejectUpgrade(socket, 403, "Forbidden")
+    if (getAllowedOrigin(req, extraOrigins) === undefined) return rejectUpgrade(socket, 403, "Forbidden")
+    const origin = req.headers.origin
 
     const url = parseOriginFormUrl(req.url, port)
     if (url === undefined) return rejectUpgrade(socket, 400, "Bad Request")
@@ -144,13 +140,17 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
       // First, before anything else: a socket without an error listener turns a malformed frame (even one sent while
       // it is closing) into an uncaught exception that takes the daemon down.
       ws.on("error", () => console.warn("A WebSocket client sent an invalid frame"))
-      if (token === null || !pairing.isValidToken(token)) {
+      const paired = token === null ? undefined : pairing.validateToken(token, origin)
+      if (token === null || paired === undefined) {
         ws.close(4401, "unauthorized")
         return
       }
       // Authorization is re-checked on every message and periodically: a pairing that expired or was evicted after
       // the upgrade must not keep a socket usable.
-      channels.attach(channelKey(windowId, agent.data), ws, () => pairing.isValidToken(token))
+      channels.attach(channelKey(windowId, agent.data), ws, {
+        isAuthorized: () => pairing.validateToken(token, origin) !== undefined,
+        mcpOrigin: paired.mcpOrigin,
+      })
     })
   })
 
@@ -174,6 +174,10 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   }
 }
 
+function matchesPath(candidate: ProviderRoute, pathname: string): boolean {
+  return candidate.pathPattern === undefined ? candidate.path === pathname : candidate.pathPattern.test(pathname)
+}
+
 function parseOriginFormUrl(target: string | undefined, port: number): URL | undefined {
   if (target === undefined || !target.startsWith("/") || target.startsWith("//")) return undefined
   try {
@@ -183,7 +187,9 @@ function parseOriginFormUrl(target: string | undefined, port: number): URL | und
   }
 }
 
-function requireToken(req: IncomingMessage, pairing: Pairing): void {
+function requireToken(req: IncomingMessage, pairing: Pairing): PairedBrowser {
   const token = getBearerToken(req)
-  if (token === undefined || !pairing.isValidToken(token)) throw new HttpError(401, "unauthorized")
+  const paired = token === undefined ? undefined : pairing.validateToken(token, req.headers.origin)
+  if (paired === undefined) throw new HttpError(401, "unauthorized")
+  return paired
 }

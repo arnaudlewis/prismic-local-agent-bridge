@@ -1,0 +1,122 @@
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+
+import { conversationId, createHarness, lastStatus, liveAgentText, notices, session, windowA } from "../testing/harness.ts"
+
+const oauthAccessToken = "oauth-access-token-the-agent-must-never-see"
+const notConnectedNotice = "This window isn't connected. Connect again from the agent panel."
+const signInNotice = "Sign in to Prismic again from the agent panel."
+
+let mcpLog = ""
+
+beforeEach(() => {
+  mcpLog = join(mkdtempSync(join(tmpdir(), "bridge-prismic-access-")), "mcp.log")
+  process.env.FAKE_AGENT_MCP_LOG = mcpLog
+})
+
+afterEach(() => {
+  delete process.env.FAKE_AGENT_MCP_LOG
+})
+
+// One entry per session the fake agent was given: the MCP server it was told to use.
+function givenToAgents(): Array<{ url: string; authorization: string }> {
+  if (!existsSync(mcpLog)) return []
+  return readFileSync(mcpLog, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { url: string; authorization: string })
+}
+
+function grantOf(entry: { authorization: string } | undefined): string {
+  return entry?.authorization.replace("Bearer ", "") ?? ""
+}
+
+describe("what an agent is given to reach Prismic", () => {
+  it("is the daemon's MCP proxy and a token of its own, never the OAuth access token", async () => {
+    const harness = createHarness({ prismicAccessToken: oauthAccessToken })
+
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+
+    const [given] = givenToAgents()
+    expect(given?.url).toBe(`http://127.0.0.1:${harness.prismic.runtime.bridgePort}/agent-mcp`)
+    const grant = grantOf(given)
+    expect(grant).not.toBe("")
+    expect(given?.authorization).not.toContain(oauthAccessToken)
+    expect(harness.prismic.runtime.grants.resolve(grant)).toEqual({ mcpOrigin: "http://127.0.0.1:1", windowKey: windowA })
+  })
+
+  it("stops working when the agent is stopped", async () => {
+    const harness = createHarness()
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    const grant = grantOf(givenToAgents()[0])
+    expect(harness.prismic.runtime.grants.resolve(grant)).toBeDefined()
+
+    await harness.agents.handleMessage(windowA, { type: "chat_delete", conversationId })
+
+    expect(harness.prismic.runtime.grants.resolve(grant)).toBeUndefined()
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
+  })
+
+  it("is not renewed when the OAuth token is refreshed or the same account signs in again, but is when another account signs in", async () => {
+    const harness = createHarness()
+    const { grants } = harness.prismic.runtime
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    const firstGrant = grantOf(givenToAgents()[0])
+
+    harness.prismic.setAccessToken("refreshed-access-token")
+    harness.prismic.setUserId("user-1")
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    expect(givenToAgents()).toHaveLength(1)
+    expect(grants.resolve(firstGrant)).toBeDefined()
+
+    harness.prismic.setUserId("someone-else")
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+
+    const all = givenToAgents()
+    expect(all).toHaveLength(2)
+    const secondGrant = grantOf(all[1])
+    expect(secondGrant).not.toBe(firstGrant)
+    // The restarted agent must not be able to keep using the previous account's proxy token.
+    expect(grants.resolve(firstGrant)).toBeUndefined()
+    expect(grants.resolve(secondGrant)).toBeDefined()
+    expect(grants.tokens()).toEqual([secondGrant])
+  })
+})
+
+describe("a window the agent cannot be started for", () => {
+  it("is told it isn't connected when no MCP origin is known for it, and no agent starts", async () => {
+    const harness = createHarness({ mcpOrigin: undefined })
+
+    await harness.agents.handleMessage(windowA, { type: "chat_open", session })
+    await harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "hello", session })
+
+    expect(notices(harness.events)).toEqual([notConnectedNotice, notConnectedNotice])
+    expect(lastStatus(harness.events)).toBe("idle")
+    expect(liveAgentText(harness.events)).toBe("")
+    expect(givenToAgents()).toEqual([])
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
+  })
+
+  it("is asked to sign in to Prismic when the daemon is signed out, and works once it is signed in again", async () => {
+    const harness = createHarness()
+    harness.prismic.setUserId(undefined)
+
+    await harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "hello", session })
+
+    expect(notices(harness.events)).toEqual([signInNotice])
+    expect(lastStatus(harness.events)).toBe("idle")
+    expect(liveAgentText(harness.events)).toBe("")
+    expect(givenToAgents()).toEqual([])
+    expect(harness.prismic.runtime.grants.tokens()).toEqual([])
+
+    harness.prismic.setUserId("user-1")
+    harness.events.length = 0
+    await harness.agents.handleMessage(windowA, { type: "chat_prompt", text: "hello again", session })
+
+    expect(notices(harness.events)).toEqual([])
+    expect(liveAgentText(harness.events)).toContain("prompt:hello again")
+    expect(givenToAgents()).toHaveLength(1)
+  })
+})

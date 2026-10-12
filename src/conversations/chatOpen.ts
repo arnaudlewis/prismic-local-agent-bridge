@@ -23,7 +23,7 @@ export async function handleChatOpen(
   sendToWindow(ctx, windowId, { type: "chat_history", events: conversation.transcript.events() })
   setStatus(ctx, conversation, conversation.process?.turnActive === true ? "running" : "starting")
   const before = conversation.process
-  const ready = await ensureAgent(ctx, conversation, windowId, message.session)
+  const ready = await ensureAgent(ctx, conversation, windowId)
   if (ready && conversation.process !== undefined && conversation.process === before) {
     sendAgentState(ctx, conversation, conversation.process)
   }

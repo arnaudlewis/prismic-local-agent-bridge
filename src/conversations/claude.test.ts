@@ -307,7 +307,7 @@ describe("the API key behind a conversation", () => {
 
     // The DELETE route's effect: the vault is emptied and the provider announces it.
     const route = provider.routes?.().find((candidate) => candidate.method === "DELETE")
-    await route?.handle({ req: {} as never, res: { writeHead: () => {}, end: () => {} } as never, url: new URL("http://x/") })
+    await route?.handle({ req: {} as never, res: { writeHead: () => {}, end: () => {} } as never, url: new URL("http://x/"), paired: undefined })
     await turn
 
     expect(notices(harness.events)).toEqual(["Add your Anthropic API key to use Claude."])
@@ -331,6 +331,7 @@ describe("the API key behind a conversation", () => {
       req: {} as never,
       res: { writeHead: () => {}, end: () => {} } as never,
       url: new URL("http://x/"),
+      paired: undefined,
     })
 
     expect(harness.events).toEqual([])

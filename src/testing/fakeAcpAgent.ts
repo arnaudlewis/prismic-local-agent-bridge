@@ -59,7 +59,7 @@ interface Message {
     configId?: string
     value?: string
     prompt?: Array<{ text: string }>
-    mcpServers?: Array<{ headers: Array<{ name: string; value: string }> }>
+    mcpServers?: Array<{ url?: string; headers: Array<{ name: string; value: string }> }>
   }
 }
 
@@ -73,6 +73,11 @@ let toolCounter = 0
 function captureWindowHeader(message: Message): void {
   const headers = message.params?.mcpServers?.[0]?.headers ?? []
   windowHeader = headers.find((header) => header.name === "X-Prismic-Window-Id")?.value ?? ""
+  // What the agent was given to reach the MCP: kept out of the chat, where the daemon redacts its own tokens.
+  const authorization = headers.find((header) => header.name === "Authorization")?.value ?? ""
+  if (process.env.FAKE_AGENT_MCP_LOG !== undefined) {
+    appendFileSync(process.env.FAKE_AGENT_MCP_LOG, `${JSON.stringify({ url: message.params?.mcpServers?.[0]?.url, authorization })}\n`)
+  }
 }
 
 function publishCommands(): void {

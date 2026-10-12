@@ -206,27 +206,30 @@ function otherBackendMessage(backend: SecretStore["backend"]): string {
   return `Found an Anthropic API key stored in the ${backend}; add it again from the panel or delete it`
 }
 
-const keychainCleanupMarker = "keychain-cleanup-pending"
-const quarantineNotice =
-  "An old Anthropic API key in the OS keychain could not be removed, so the keychain is not used; remove that keychain item or restart the bridge to try again"
+const keychainCleanupMarkerSuffix = "keychain-cleanup-pending"
+
+function quarantineNotice(label: string): string {
+  return `An old ${label} in the OS keychain could not be removed, so the keychain is not used; remove that keychain item or restart the bridge to try again`
+}
 
 // The store in use (the OS keychain when it works, else the private file) and the other one, which only ever gets
 // cleaned (see otherStores). The keychain can come and go between runs: a removal or replacement made while it was
 // away is recorded, and the keychain is not read again until its copy is really deleted. If that deletion fails the
-// keychain stays out of use (the file is used) and /status says so.
+// keychain stays out of use (the file is used) and /status says so. `label` names the secret in messages.
 export async function createDefaultSecretStores(args: {
   dataDir: string
   name: string
+  label: string
   keychainEntry?: KeychainEntryFactory
 }): Promise<{ store: SecretStore; otherStores: SecretStore[]; revocation?: RevocationMarker; notice?: string }> {
   const file = createFileSecretStore({ dataDir: args.dataDir, name: args.name })
-  const marker = createRevocationMarker({ dataDir: args.dataDir, name: keychainCleanupMarker })
+  const marker = createRevocationMarker({ dataDir: args.dataDir, name: `${args.name}.${keychainCleanupMarkerSuffix}` })
   let keychain: SecretStore
   try {
     keychain = await createKeychainSecretStore({ account: args.name, entry: args.keychainEntry })
   } catch (error) {
     if (!(error instanceof SecretStoreUnavailableError)) throw error
-    console.warn("No usable OS keychain: the Anthropic API key will be kept in a private file instead")
+    console.warn(`No usable OS keychain: the ${args.label} will be kept in a private file instead`)
     return { store: file, otherStores: [], revocation: marker }
   }
   if (marker.isSet()) {
@@ -234,8 +237,8 @@ export async function createDefaultSecretStores(args: {
       await keychain.delete()
       marker.clear()
     } catch {
-      console.warn("Could not remove an old copy of the Anthropic API key from the OS keychain: it is not used")
-      return { store: file, otherStores: [], revocation: marker, notice: quarantineNotice }
+      console.warn(`Could not remove an old copy of the ${args.label} from the OS keychain: it is not used`)
+      return { store: file, otherStores: [], revocation: marker, notice: quarantineNotice(args.label) }
     }
   }
   return { store: keychain, otherStores: [file] }

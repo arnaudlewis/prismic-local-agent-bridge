@@ -1,9 +1,21 @@
 import type { AgentProvider } from "../agents/provider.ts"
 import type { ConversationStore } from "../conversationStore.ts"
+import type { AgentMcpGrants } from "../prismic/agentMcpProxy.ts"
+import type { McpUpstream } from "../prismic/mcpUpstream.ts"
+import type { PrismicAuth } from "../prismic/prismicAuth.ts"
 import type { AgentId } from "../protocol.ts"
 import type { WindowChannels } from "../windowChannels.ts"
 import type { MessageRedactor } from "./redaction.ts"
 import type { Conversation } from "./types.ts"
+
+// The daemon's own Prismic sign-in and the ways it uses it: the agents never hold a Prismic token.
+export interface PrismicRuntime {
+  auth: PrismicAuth
+  upstream: McpUpstream
+  grants: AgentMcpGrants
+  // The port of the daemon: the agents reach their MCP proxy on it.
+  bridgePort: number
+}
 
 // A conversation with no window attached and no turn running is stopped (and dropped from memory) after this long.
 export const defaultIdleTtlMs = 6 * 60 * 60 * 1000
@@ -41,11 +53,16 @@ export interface Context {
   redactors: Map<string, MessageRedactor>
   // Monotonic counter behind Conversation.lastActiveAt.
   activity: { tick: number }
+  prismic: PrismicRuntime
 }
 
-// Every secret any provider's credentials are made of.
+// Every secret the daemon holds: the providers' credentials, the Prismic tokens and the agents' proxy tokens.
 export function knownSecrets(ctx: Context): string[] {
-  return [...ctx.providers.values()].flatMap((provider) => provider.secretValues?.() ?? [])
+  return [
+    ...[...ctx.providers.values()].flatMap((provider) => provider.secretValues?.() ?? []),
+    ...ctx.prismic.auth.knownTokens(),
+    ...ctx.prismic.grants.tokens(),
+  ]
 }
 
 export function providerOf(ctx: Context, conversation: Conversation): AgentProvider {

@@ -29,6 +29,7 @@ export function stopAgent(ctx: Context, conversation: Conversation): ChildProces
   if (agent === undefined) return undefined
   cancelPendingPermissions(ctx, conversation, agent)
   agent.child.kill("SIGTERM")
+  ctx.prismic.grants.revoke(agent.grantToken)
   return agent.child
 }
 

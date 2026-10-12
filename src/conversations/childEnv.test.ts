@@ -193,8 +193,6 @@ const claudeKey = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
 const session: Session = {
   agent: "codex",
   conversationId,
-  mcpServerUrl: "http://localhost:3030/mcp",
-  prismicToken: "token",
   repository: "repo",
 }
 

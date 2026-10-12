@@ -1,17 +1,19 @@
 import { extractToolResultJson } from "./editorContext.ts"
+import type { McpUpstream } from "./prismic/mcpUpstream.ts"
+import { PrismicSignInRequiredError } from "./prismic/prismicAuth.ts"
 
 const maxResponseBytes = 512 * 1024
 const defaultTimeoutMs = 4000
 
 interface ReadEditorContextArgs {
-  mcpServerUrl: string
-  prismicToken: string
+  upstream: McpUpstream
+  mcpOrigin: string
   windowId: string
   pinnedDocumentId: string | undefined
   timeoutMs?: number
 }
 
-// `reason` is a fixed category: neither the URL, the token nor any part of the response ever ends up in it.
+// `reason` is a fixed category: neither the origin, a token nor any part of the response ever ends up in it.
 export type ReadEditorContextOutcome = { ok: true; value: unknown } | { ok: false; reason: string }
 
 class ReadFailure extends Error {}
@@ -24,6 +26,7 @@ export async function readEditorContext(args: ReadEditorContextArgs): Promise<Re
   try {
     return { ok: true, value: await callTool(args, controller) }
   } catch (error) {
+    if (error instanceof PrismicSignInRequiredError) return { ok: false, reason: "sign-in required" }
     if (controller.signal.aborted && !(error instanceof ReadFailure)) return { ok: false, reason: "timeout" }
     return { ok: false, reason: error instanceof ReadFailure ? error.message : "network error" }
   } finally {
@@ -32,32 +35,30 @@ export async function readEditorContext(args: ReadEditorContextArgs): Promise<Re
 }
 
 async function callTool(args: ReadEditorContextArgs, controller: AbortController): Promise<unknown> {
-  const response = await fetch(args.mcpServerUrl, {
+  // The upstream adds the OAuth token, refreshes it on a 401, and refuses redirects.
+  const response = await args.upstream.send({
+    mcpOrigin: args.mcpOrigin,
+    path: "/mcp",
     method: "POST",
     headers: {
-      Authorization: `Bearer ${args.prismicToken}`,
-      "X-Prismic-Window-Id": args.windowId,
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream",
+      "x-prismic-window-id": args.windowId,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
     },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "get_editor_context",
-        arguments: args.pinnedDocumentId === undefined ? {} : { pinnedDocumentId: args.pinnedDocumentId },
-      },
-    }),
-    // Only the configured URL is ever contacted: a redirect, to another origin or not, is a failure.
-    redirect: "manual",
+    body: Buffer.from(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "get_editor_context",
+          arguments: args.pinnedDocumentId === undefined ? {} : { pinnedDocumentId: args.pinnedDocumentId },
+        },
+      }),
+    ),
     signal: controller.signal,
   })
 
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel()
-    throw new ReadFailure("redirect refused")
-  }
   if (!response.ok) {
     await response.body?.cancel()
     throw new ReadFailure(`http ${response.status}`)
