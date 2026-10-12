@@ -203,24 +203,41 @@ describe("persistent pairing", () => {
     expect(createPairing({ onCodeChanged: () => {}, dataDir, now: () => time }).pairedBrowserCount()).toBe(20)
   })
 
+  const validEntry = { hash: "a".repeat(64), createdAt: 1, lastUsedAt: 1 }
+
+  // Each fixture is valid JSON (except the first) with one specific wrong shape, so zod is what rejects it. The
+  // marker sits in a string the schema would reject or ignore, to prove warnings never print file content.
   it.each([
-    ["not json", "{not json"],
-    ["wrong shape", JSON.stringify({ version: 1, tokens: "nope" })],
-    ["bad hash", JSON.stringify({ version: 1, tokens: [{ hash: "abc", createdAt: 1, lastUsedAt: 1 }] })],
-    ["too many entries", JSON.stringify({ version: 1, tokens: Array.from({ length: 21 }, () => ({ hash: "a".repeat(64), createdAt: 1, lastUsedAt: 1 })) })],
-    ["oversized", " ".repeat(65 * 1024)],
+    ["invalid JSON", "{not json SECRET-CONTENT"],
+    ["wrong version", JSON.stringify({ version: 2, tokens: [], note: "SECRET-CONTENT" })],
+    ["tokens is not an array", JSON.stringify({ version: 1, tokens: "SECRET-CONTENT" })],
+    ["a non-hex hash", JSON.stringify({ version: 1, tokens: [{ ...validEntry, hash: "SECRET-CONTENT" }] })],
+    ["a short hash", JSON.stringify({ version: 1, tokens: [{ ...validEntry, hash: "abc123" }] })],
+    ["a missing lastUsedAt", JSON.stringify({ version: 1, tokens: [{ hash: "a".repeat(64), createdAt: 1 }] })],
+    ["a string timestamp", JSON.stringify({ version: 1, tokens: [{ ...validEntry, createdAt: "SECRET-CONTENT" }] })],
+    ["21 entries", JSON.stringify({ version: 1, tokens: Array.from({ length: 21 }, () => validEntry) })],
+    ["a top-level array", JSON.stringify([validEntry, "SECRET-CONTENT"])],
+    ["null", "null"],
+    ["oversized", JSON.stringify({ version: 1, tokens: [], note: "SECRET-CONTENT".repeat(6000) })],
   ])("ignores a corrupt file (%s) with a warning that does not print its content", (_name, content) => {
     const { dataDir, file } = createStore()
-    writeFileSync(file, `${content}SECRET-CONTENT`.slice(0, content.length + 14))
+    writeFileSync(file, content)
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
 
     const pairing = createPairing({ onCodeChanged: () => {}, dataDir })
 
     expect(pairing.pairedBrowserCount()).toBe(0)
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(warn.mock.calls.flat().join(" ")).not.toContain("SECRET")
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("SECRET-CONTENT")
     warn.mockRestore()
     expect(pairOnce(pairing)).toBeTruthy()
+  })
+
+  it("accepts a well-formed file, so the corrupt cases above fail for their own reason", () => {
+    const { dataDir, file } = createStore()
+    writeFileSync(file, JSON.stringify({ version: 1, tokens: [{ ...validEntry, lastUsedAt: Date.now() }] }))
+
+    expect(createPairing({ onCodeChanged: () => {}, dataDir }).pairedBrowserCount()).toBe(1)
   })
 
   it("ignores a pairing file that is a symlink", () => {

@@ -49,6 +49,7 @@ Entering the pairing code in the panel gives the browser a token it keeps in its
 - **Restarts:** a paired browser is still accepted after a daemon restart, so the code only has to be entered once. The code mechanics are unchanged: it rotates after each successful pair and after 5 wrong attempts, with the doubling cooldown (kept in memory only).
 - **Expiry and limits:** a token unused for 30 days is dropped. At most 20 browsers are remembered; pairing a 21st drops the least recently used one. `lastUsedAt` is updated in memory on every request but written to disk at most once an hour.
 - **Unknown token:** a browser presenting a token the daemon doesn't know gets 401 (or a WebSocket close with 4401), and the panel asks for a code again.
+- **Open sockets:** a WebSocket authorized at upgrade is re-checked against its pairing before every inbound message and every 60 s. If the pairing expired or was evicted, the socket is closed with 4401 "unauthorized" and the message is dropped. These checks count as use of the pairing (`lastUsedAt`, written at most once an hour), so a browser tab that stays open keeps its pairing alive.
 - **Revoking:** start with `--forget-pairings`, or delete `pairing.json` (then restart). All browsers must pair again. A corrupt, oversized or non-regular `pairing.json` is ignored with a warning (its content is never printed) and the daemon starts with no paired browsers.
 
 ## Codex home

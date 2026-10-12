@@ -4,19 +4,28 @@ import { ClientMessageSchema } from "./protocol.ts"
 import type { BridgeEvent, ClientMessage } from "./protocol.ts"
 
 const closeGraceMs = 15_000
+const recheckIntervalMs = 60_000
 
 type MessageListener = (windowId: string, message: ClientMessage) => void
 type WindowClosedListener = (windowId: string) => void
 
 export interface WindowChannels {
-  attach(windowId: string, socket: WebSocket): void
+  // `isAuthorized` is called before every inbound message and periodically; once it returns false the socket is closed.
+  attach(windowId: string, socket: WebSocket, isAuthorized: () => boolean): void
   send(windowId: string, event: BridgeEvent): void
   onMessage(listener: MessageListener): void
   onWindowClosed(listener: WindowClosedListener): void
 }
 
-export function createWindowChannels(): WindowChannels {
+interface CreateWindowChannelsArgs {
+  // Only tests change it.
+  recheckIntervalMs?: number
+}
+
+export function createWindowChannels(args: CreateWindowChannelsArgs = {}): WindowChannels {
+  const recheckMs = args.recheckIntervalMs ?? recheckIntervalMs
   const sockets = new Map<string, WebSocket>()
+  const recheckTimers = new Map<WebSocket, NodeJS.Timeout>()
   const graceTimers = new Map<string, NodeJS.Timeout>()
   const messageListeners: MessageListener[] = []
   const windowClosedListeners: WindowClosedListener[] = []
@@ -28,6 +37,11 @@ export function createWindowChannels(): WindowChannels {
       return
     }
     for (const listener of messageListeners) listener(windowId, message)
+  }
+
+  function stopRecheck(socket: WebSocket): void {
+    clearInterval(recheckTimers.get(socket))
+    recheckTimers.delete(socket)
   }
 
   function handleSocketClosed(windowId: string, socket: WebSocket): void {
@@ -42,7 +56,7 @@ export function createWindowChannels(): WindowChannels {
   }
 
   return {
-    attach(windowId, socket) {
+    attach(windowId, socket, isAuthorized) {
       const graceTimer = graceTimers.get(windowId)
       if (graceTimer !== undefined) {
         clearTimeout(graceTimer)
@@ -55,18 +69,34 @@ export function createWindowChannels(): WindowChannels {
         previous.removeAllListeners("message")
         previous.removeAllListeners("close")
         previous.on("error", () => {})
+        stopRecheck(previous)
         previous.close(4000, "replaced")
       }
 
+      // Returns false (and closes the socket) when the pairing behind it is gone.
+      const stillAuthorized = () => {
+        if (isAuthorized()) return true
+        stopRecheck(socket)
+        socket.close(4401, "unauthorized")
+        return false
+      }
+      const timer = setInterval(stillAuthorized, recheckMs)
+      timer.unref()
+      recheckTimers.set(socket, timer)
+
       socket.on("message", (data, isBinary) => {
         if (sockets.get(windowId) !== socket) return
+        if (!stillAuthorized()) return
         if (isBinary) {
           console.warn(`Ignored binary message from window ${windowId}`)
           return
         }
         handleSocketMessage(windowId, data.toString())
       })
-      socket.on("close", () => handleSocketClosed(windowId, socket))
+      socket.on("close", () => {
+        stopRecheck(socket)
+        handleSocketClosed(windowId, socket)
+      })
       socket.on("error", (error) => console.warn(`Socket error for window ${windowId}: ${error.message}`))
     },
     send(windowId, event) {

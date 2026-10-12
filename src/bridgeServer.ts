@@ -148,11 +148,16 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
 
     const token = url.searchParams.get("token")
     wss.handleUpgrade(req, socket, head, (ws) => {
+      // First, before anything else: a socket without an error listener turns a malformed frame (even one sent while
+      // it is closing) into an uncaught exception that takes the daemon down.
+      ws.on("error", () => console.warn("A WebSocket client sent an invalid frame"))
       if (token === null || !pairing.isValidToken(token)) {
         ws.close(4401, "unauthorized")
         return
       }
-      channels.attach(windowId, ws)
+      // Authorization is re-checked on every message and periodically: a pairing that expired or was evicted after
+      // the upgrade must not keep a socket usable.
+      channels.attach(windowId, ws, () => pairing.isValidToken(token))
     })
   })
 

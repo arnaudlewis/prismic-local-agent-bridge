@@ -16,7 +16,10 @@ class FakeSocket extends EventEmitter {
     this.sent.push(data)
   }
 
-  close(): void {
+  closed: Array<{ code?: number; reason?: string }> = []
+
+  close(code?: number, reason?: string): void {
+    this.closed.push({ code, reason })
     this.readyState = 3
   }
 
@@ -25,9 +28,12 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function attach(channels: ReturnType<typeof createWindowChannels>): FakeSocket {
+function attach(
+  channels: ReturnType<typeof createWindowChannels>,
+  isAuthorized: () => boolean = () => true,
+): FakeSocket {
   const socket = new FakeSocket()
-  channels.attach(windowId, socket as unknown as WebSocket)
+  channels.attach(windowId, socket as unknown as WebSocket, isAuthorized)
   return socket
 }
 
@@ -85,5 +91,63 @@ describe("createWindowChannels", () => {
 
     expect(oldSocket.sent).toEqual([])
     expect(newSocket.sent).toHaveLength(1)
+  })
+
+  it("checks the authorization before every message, and closes with 4401 without dispatching once it is gone", () => {
+    const channels = createWindowChannels()
+    const received: ClientMessage[] = []
+    channels.onMessage((_windowId, message) => received.push(message))
+    let authorized = true
+    const socket = attach(channels, () => authorized)
+
+    socket.receive({ type: "chat_cancel" })
+    expect(received).toEqual([{ type: "chat_cancel" }])
+
+    authorized = false
+    socket.receive({ type: "chat_reset" })
+    socket.receive({ type: "permission_response", requestId: "r1", optionId: "allow" })
+
+    expect(received).toEqual([{ type: "chat_cancel" }])
+    expect(socket.closed[0]).toEqual({ code: 4401, reason: "unauthorized" })
+  })
+
+  it("re-checks idle sockets periodically and closes the ones whose pairing is gone", () => {
+    vi.useFakeTimers()
+    try {
+      const channels = createWindowChannels()
+      let authorized = true
+      const socket = attach(channels, () => authorized)
+
+      vi.advanceTimersByTime(60_000)
+      expect(socket.closed).toEqual([])
+
+      authorized = false
+      vi.advanceTimersByTime(60_000)
+      expect(socket.closed).toEqual([{ code: 4401, reason: "unauthorized" }])
+
+      // It is checked no more once closed.
+      vi.advanceTimersByTime(300_000)
+      expect(socket.closed).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops re-checking a socket that was replaced or closed", () => {
+    vi.useFakeTimers()
+    try {
+      const channels = createWindowChannels()
+      const isAuthorized = vi.fn(() => true)
+      const oldSocket = attach(channels, isAuthorized)
+      attach(channels)
+      isAuthorized.mockClear()
+
+      vi.advanceTimersByTime(180_000)
+
+      expect(isAuthorized).not.toHaveBeenCalled()
+      expect(oldSocket.closed).toEqual([{ code: 4000, reason: "replaced" }])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
