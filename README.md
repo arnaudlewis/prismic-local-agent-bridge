@@ -20,6 +20,7 @@ The daemon listens on `http://127.0.0.1:7878` and prints a banner with a pairing
 | `--origin` | `http://localhost:5173` | Allowed browser origin. Repeatable. |
 | `--model` | Codex default | Model slug forced in the Codex config (`[A-Za-z0-9._:-]+`). |
 | `--agent-mode` | `read-only` | `read-only`, `workspace-write`, `agent` or `agent-full-access`. |
+| `--forget-pairings` | off | Delete `pairing.json` at startup: every browser must pair again (see Pairing). |
 | `--use-user-codex` | off | Run Codex with your real Codex home instead of an isolated one (see below). |
 
 Environment:
@@ -39,7 +40,16 @@ npm start -- --use-user-codex
 2. "Continue with ChatGPT" opens your browser. If you close that window, click "Restart sign-in" in the panel (the authorization URL is also printed in the terminal).
 3. Pick a model and reasoning effort, then chat. The agent works in an empty private workspace unless you pass `--project <website folder>`; document access goes through the Prismic MCP either way.
 
-After a daemon restart you must pair again (tokens live in memory), but the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
+A paired browser stays paired across daemon restarts (see Pairing), and the ChatGPT sign-in is kept in `~/.config/prismic-local-agent-bridge/credentials.json`.
+
+## Pairing
+
+Entering the pairing code in the panel gives the browser a token it keeps in its `localStorage`. The daemon remembers only a SHA-256 hash of each token, with its creation and last-use times, in `<data dir>/pairing.json` (`0600`, written atomically). The banner shows `Paired browsers: N` and the current `Pairing code: <code>`.
+
+- **Restarts:** a paired browser is still accepted after a daemon restart, so the code only has to be entered once. The code mechanics are unchanged: it rotates after each successful pair and after 5 wrong attempts, with the doubling cooldown (kept in memory only).
+- **Expiry and limits:** a token unused for 30 days is dropped. At most 20 browsers are remembered; pairing a 21st drops the least recently used one. `lastUsedAt` is updated in memory on every request but written to disk at most once an hour.
+- **Unknown token:** a browser presenting a token the daemon doesn't know gets 401 (or a WebSocket close with 4401), and the panel asks for a code again.
+- **Revoking:** start with `--forget-pairings`, or delete `pairing.json` (then restart). All browsers must pair again. A corrupt, oversized or non-regular `pairing.json` is ignored with a warning (its content is never printed) and the daemon starts with no paired browsers.
 
 ## Codex home
 
@@ -102,7 +112,7 @@ The first prompt of a conversation is preceded by a preamble that also holds an 
 
 ## Threat model
 
-- **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization.
+- **Trust boundary:** an allowed origin plus the pairing token. Whoever holds both can drive the agent; the bridge has no further per-action authorization. Tokens are stored as hashes in `pairing.json`, so a stolen file yields no usable token, but the token in the browser's `localStorage` stays a bearer secret until 30 days of inactivity (or `--forget-pairings`).
 - **The paired browser does everything:** it sends prompts, approves permission requests (the permission cards), and can switch the agent between `read-only`, `workspace-write`, `agent` (auto review) and `agent-full-access` with `set_config_option`. A page that is compromised, or that injects instructions into the agent, is therefore as powerful as the selected mode and the user's approvals allow.
 - **The default workspace is empty, but it is not a boundary:** without `--project` the agent's working directory is `<data dir>/workspace`, which holds no project files. What the agent can read or write on disk is decided by the sandbox mode, not by the working directory: Codex's `read-only` mode can still read files outside the workspace.
 - **Full access is available by default** (a deliberate choice, with no CLI gate). It is selectable from the browser UI after its confirmation, it never asks for approvals, and it gives the agent unrestricted file and network access as the local user. Page and document content is untrusted, so a prompt injection can use it. `preferredConfig.mode` is ignored at `chat_open`: the mode only changes through an explicit `set_config_option`.
@@ -133,7 +143,7 @@ Open the agent panel, pick "Local agent", enter the pairing code, then "Continue
 
 - Bound to `127.0.0.1`; requests must carry a `127.0.0.1:<port>` or `localhost:<port>` Host header.
 - Browser requests and WebSocket upgrades must come from an allowed origin (`/auth/callback` is exempt and validated by `state`).
-- API and WebSocket access needs a token obtained by pairing; tokens live in memory only. Five wrong codes rotate the code and start a cooldown (30 s, doubling up to 15 min, reset by a successful pair) during which `/pair` returns 429.
+- API and WebSocket access needs a token obtained by pairing; only token hashes are stored (see Pairing). Five wrong codes rotate the code and start a cooldown (30 s, doubling up to 15 min, reset by a successful pair) during which `/pair` returns 429.
 - Tokens (pairing, ChatGPT, Prismic) are never logged.
 
 ## Checks
