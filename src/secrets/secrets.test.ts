@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 
 import { createMemorySecretStore } from "../testing/memorySecretStore.ts"
-import { KeyManagedByEnvironmentError, createApiKeyVault, createDefaultSecretStore } from "./apiKeyVault.ts"
+import { KeyManagedByEnvironmentError, createApiKeyVault, createDefaultSecretStores } from "./apiKeyVault.ts"
 import { createFileSecretStore } from "./fileStore.ts"
 import { createKeychainSecretStore } from "./keychainStore.ts"
 import type { KeychainEntry } from "./keychainStore.ts"
@@ -190,7 +190,7 @@ describe("default secret store", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
     const dataDir = tempDir()
 
-    const store = await createDefaultSecretStore({
+    const { store } = await createDefaultSecretStores({
       dataDir,
       name: "claude-api-key",
       keychainEntry: fakeEntry({
@@ -206,9 +206,10 @@ describe("default secret store", () => {
   })
 
   it("uses the keychain when it works", async () => {
-    const store = await createDefaultSecretStore({ dataDir: tempDir(), name: "k", keychainEntry: fakeEntry() })
+    const { store, otherStores } = await createDefaultSecretStores({ dataDir: tempDir(), name: "k", keychainEntry: fakeEntry() })
 
     expect(store.backend).toBe("keychain")
+    expect(otherStores.map((other) => other.backend)).toEqual(["file"])
   })
 })
 

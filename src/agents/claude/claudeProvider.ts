@@ -108,7 +108,9 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
 
     async bannerLines() {
       const status = await vault.status()
-      const key = status.configured
+      const key = status.error !== undefined
+        ? status.error
+        : status.configured
         ? `Anthropic API key configured (${status.storage}, ${status.keyHint})`
         : `no Anthropic API key yet (it will be kept in ${status.storage === "keychain" ? "the OS keychain" : "a private file, there is no OS keychain"})`
       return [

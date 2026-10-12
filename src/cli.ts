@@ -14,7 +14,7 @@ import type { AgentProvider } from "./agents/provider.ts"
 import { createAgentSessions } from "./agentSessions.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import { createPairing, forgetPairings } from "./pairing.ts"
-import { createApiKeyVault, createDefaultSecretStore } from "./secrets/apiKeyVault.ts"
+import { createApiKeyVault, createDefaultSecretStores } from "./secrets/apiKeyVault.ts"
 import { passEnvNamePattern } from "./conversations/childEnv.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     }),
     createClaudeProvider({
       dataDir,
-      vault: createApiKeyVault({ store: await createDefaultSecretStore({ dataDir, name: "claude-api-key" }) }),
+      vault: createApiKeyVault(await createDefaultSecretStores({ dataDir, name: "claude-api-key" })),
       userClaudeHome,
     }),
   ]

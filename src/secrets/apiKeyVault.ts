@@ -42,13 +42,20 @@ export interface ApiKeyVault {
 }
 
 interface CreateApiKeyVaultArgs {
+  // The store in use: where keys are written and read.
   store: SecretStore
+  // Every other place a copy of the key could be (the file when the keychain is in use, and the other way round).
+  // The keychain can be unavailable on one run and available on the next: a key removed or replaced on one backend
+  // must not come back from the other. They are cleaned on every set and remove, and never read from.
+  otherStores?: SecretStore[]
   // The environment variable that provides a read-only key, as it is when asked.
   env?: () => string | undefined
 }
 
 export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
   const { store } = args
+  const otherStores = args.otherStores ?? []
+  let warnedAboutOtherBackend = false
   const readEnv = args.env ?? (() => process.env.ANTHROPIC_API_KEY)
   const salt = randomBytes(32)
   let mutationEpoch = 0
@@ -74,12 +81,45 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     return stored === undefined ? undefined : { key: stored, storage: store.backend }
   }
 
+  // Best effort, and never a word about the content: an error here must not stop a removal or a replacement.
+  async function clearOtherStores(): Promise<void> {
+    for (const other of otherStores) {
+      try {
+        await other.delete()
+      } catch {
+        console.warn(`Could not remove a copy of the Anthropic API key kept in the ${other.backend} backend`)
+      }
+    }
+  }
+
   async function storeKey(key: string): Promise<void> {
     if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
     // Before and after: whoever read the key while this runs must not trust what it read.
     credentialEpoch += 1
     await store.set(key)
+    await clearOtherStores()
     credentialEpoch += 1
+  }
+
+  // A key that is only in another backend (the keychain came or went since it was stored) is not used: the user adds
+  // it again, or deletes it. Says so, once, without the key.
+  async function otherBackendWithKey(): Promise<SecretStore | undefined> {
+    for (const other of otherStores) {
+      let found: string | undefined
+      try {
+        found = await other.get()
+      } catch {
+        continue
+      }
+      if (found !== undefined) {
+        if (!warnedAboutOtherBackend) {
+          warnedAboutOtherBackend = true
+          console.warn(otherBackendMessage(other.backend))
+        }
+        return other
+      }
+    }
+    return undefined
   }
 
   return {
@@ -102,6 +142,7 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
         if (envKey() !== undefined) throw new KeyManagedByEnvironmentError()
         try {
           await store.delete()
+          await clearOtherStores()
         } finally {
           credentialEpoch += 1
         }
@@ -110,24 +151,63 @@ export function createApiKeyVault(args: CreateApiKeyVaultArgs): ApiKeyVault {
     storage: () => (envKey() === undefined ? store.backend : "env"),
     async status() {
       const found = await get()
-      if (found === undefined) return { configured: false, storage: store.backend }
+      if (found === undefined) {
+        const other = await otherBackendWithKey()
+        return {
+          configured: false,
+          storage: store.backend,
+          ...(other === undefined ? {} : { error: otherBackendMessage(other.backend) }),
+        }
+      }
       return { configured: true, keyHint: `…${found.key.slice(-4)}`, storage: found.storage }
     },
     fingerprint: (key) => createHmac("sha256", salt).update(key).digest("hex").slice(0, 16),
   }
 }
 
+function otherBackendMessage(backend: SecretStore["backend"]): string {
+  return `Found an Anthropic API key stored in the ${backend}; add it again from the panel or delete it`
+}
+
 // The keychain when it works, else the private file.
-export async function createDefaultSecretStore(args: {
+const keychainCleanupMarker = "keychain-cleanup-pending"
+
+// Stands in for the keychain while it is unavailable: it holds nothing, and "deleting" from it leaves a marker, so
+// that the keychain's own copy (which can't be reached now) is removed the next time the keychain works.
+function createPendingKeychainCleanup(dataDir: string): SecretStore {
+  const marker = createFileSecretStore({ dataDir, name: keychainCleanupMarker })
+  return {
+    backend: "keychain",
+    get: () => Promise.resolve(undefined),
+    set: () => Promise.resolve(),
+    delete: () => marker.set("pending"),
+  }
+}
+
+// The store in use (the OS keychain when it works, else the private file) and the other one, which only ever gets
+// cleaned (see otherStores). The keychain can come and go between runs: a removal or replacement made while it was
+// away is applied to its copy as soon as it is back.
+export async function createDefaultSecretStores(args: {
   dataDir: string
   name: string
   keychainEntry?: KeychainEntryFactory
-}): Promise<SecretStore> {
+}): Promise<{ store: SecretStore; otherStores: SecretStore[] }> {
+  const file = createFileSecretStore({ dataDir: args.dataDir, name: args.name })
   try {
-    return await createKeychainSecretStore({ account: args.name, entry: args.keychainEntry })
+    const keychain = await createKeychainSecretStore({ account: args.name, entry: args.keychainEntry })
+    const marker = createFileSecretStore({ dataDir: args.dataDir, name: keychainCleanupMarker })
+    if ((await marker.get()) !== undefined) {
+      try {
+        await keychain.delete()
+        await marker.delete()
+      } catch {
+        console.warn("Could not remove an old copy of the Anthropic API key from the OS keychain")
+      }
+    }
+    return { store: keychain, otherStores: [file] }
   } catch (error) {
     if (!(error instanceof SecretStoreUnavailableError)) throw error
     console.warn("No usable OS keychain: the Anthropic API key will be kept in a private file instead")
-    return createFileSecretStore({ dataDir: args.dataDir, name: args.name })
+    return { store: file, otherStores: [createPendingKeychainCleanup(args.dataDir)] }
   }
 }
