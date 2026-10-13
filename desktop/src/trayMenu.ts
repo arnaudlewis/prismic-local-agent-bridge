@@ -2,7 +2,7 @@ import { join } from "node:path"
 import { Menu, Tray, app, nativeImage, shell } from "electron"
 import type { MenuItemConstructorOptions, NativeImage } from "electron"
 
-import type { BridgeProcess, BridgeState, SignOutAccount } from "./bridgeProcess.ts"
+import type { BridgeProcess, BridgeState, SignedInAccounts, SignOutAccount } from "./bridgeProcess.ts"
 import type { AvailableUpdate } from "./updateCheck.ts"
 
 interface CreateTrayMenuArgs {
@@ -66,14 +66,7 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
           refresh()
         },
       },
-      {
-        label: "Sign Out",
-        submenu: [
-          { label: "Sign out of Prismic…", click: () => signOut("prismic") },
-          { label: "Sign out of ChatGPT…", click: () => signOut("chatgpt") },
-        ],
-      },
-      { label: "Sign in with ChatGPT…", click: () => signInToChatGpt() },
+      ...accountEntries({ signedIn: bridge.signedIn(), signOut, signInToChatGpt }),
     ]
     if (update !== undefined) {
       items.push({
@@ -132,4 +125,22 @@ function editorLines(state: BridgeState): MenuItemConstructorOptions[] {
 function accountLines(accounts: string[]): MenuItemConstructorOptions[] {
   if (accounts.length === 0) return []
   return [{ type: "separator" }, ...accounts.map((line): MenuItemConstructorOptions => ({ label: line, enabled: false }))]
+}
+
+interface AccountEntriesArgs {
+  signedIn: SignedInAccounts
+  signOut: (account: SignOutAccount) => void
+  signInToChatGpt: () => void
+}
+
+// Only what applies: nothing to sign out of when signed out, and no sign-in offered to someone who is signed in.
+// Prismic is signed in from the Page Builder, so there is nothing to offer for it here.
+function accountEntries(args: AccountEntriesArgs): MenuItemConstructorOptions[] {
+  const { signedIn, signOut, signInToChatGpt } = args
+  const signOuts: MenuItemConstructorOptions[] = []
+  if (signedIn.prismic) signOuts.push({ label: "Sign out of Prismic…", click: () => signOut("prismic") })
+  if (signedIn.chatgpt) signOuts.push({ label: "Sign out of ChatGPT…", click: () => signOut("chatgpt") })
+  const entries: MenuItemConstructorOptions[] = signOuts.length > 1 ? [{ label: "Sign Out", submenu: signOuts }] : signOuts
+  if (!signedIn.chatgpt) entries.push({ label: "Sign in with ChatGPT…", click: () => signInToChatGpt() })
+  return entries
 }

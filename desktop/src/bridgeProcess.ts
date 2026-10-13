@@ -29,6 +29,19 @@ export type SignOutAccount = "prismic" | "chatgpt"
 // The daemon's answer to a Claude Code sign-in request (src/agents/provider.ts). `reason` is shown to the user.
 export type ClaudeSignInResult = { status: "already_signed_in" | "signed_in" } | { status: "failed"; reason: string }
 
+// Which accounts the daemon is signed in to (src/accountsReport.ts): the menu offers to sign in or out accordingly.
+export interface SignedInAccounts {
+  prismic: boolean
+  chatgpt: boolean
+}
+
+interface AccountsReport {
+  lines: string[]
+  signedIn: SignedInAccounts
+}
+
+const noAccounts: AccountsReport = { lines: [], signedIn: { prismic: false, chatgpt: false } }
+
 export interface BridgeProcess {
   signOut(account: SignOutAccount): Promise<boolean>
   // Asks the daemon for the ChatGPT authorization URL, to open in the browser.
@@ -44,6 +57,8 @@ export interface BridgeProcess {
   state(): BridgeState
   // One line per account the daemon runs as (Prismic, Codex, Claude); empty until it has reported.
   accounts(): string[]
+  // Which accounts the daemon is signed in to; none until it has reported.
+  signedIn(): SignedInAccounts
 }
 
 // The daemon exits with this code when its port is taken (portInUseExitCode in src/cli.ts).
@@ -76,8 +91,8 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
   let signInWaiter: ((url: string | undefined) => void) | undefined
   let claudeSignInWaiter: ((result: ClaudeSignInResult) => void) | undefined
   let claudeSignIn: Promise<ClaudeSignInResult> | undefined
-  // Who the daemon runs as, as lines for the menu (src/cli.ts).
-  let accounts: string[] = []
+  // Who the daemon runs as, and what it is signed in to, for the menu (src/cli.ts).
+  let accounts: AccountsReport = noAccounts
 
   function setState(next: BridgeState): void {
     state = next
@@ -122,7 +137,7 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
       handled = true
       clearInterval(healthTimer)
       child = undefined
-      accounts = []
+      accounts = noAccounts
       claudeSignInWaiter?.({ status: "failed", reason: "Prismic Agent stopped before the sign-in finished." })
       if (stopRequested) return setState({ kind: "stopped" })
       if (code === portInUseExitCode) {
@@ -258,7 +273,8 @@ export function createBridgeProcess(args: CreateBridgeProcessArgs): BridgeProces
     },
     isStopped: () => state.kind === "stopped",
     state: () => state,
-    accounts: () => accounts,
+    accounts: () => accounts.lines,
+    signedIn: () => accounts.signedIn,
   }
 }
 
@@ -319,13 +335,16 @@ function readSignedOut(message: unknown): { account: SignOutAccount; ok: boolean
   return { account, ok }
 }
 
-// The daemon's account lines (src/cli.ts): who it runs as, for the menu.
-function readAccounts(message: unknown): string[] | undefined {
+// The daemon's account report (src/cli.ts): who it runs as, as lines, and which accounts it is signed in to.
+function readAccounts(message: unknown): AccountsReport | undefined {
   if (typeof message !== "object" || message === null) return undefined
-  if (!("type" in message) || message.type !== "accounts" || !("accounts" in message)) return undefined
-  const { accounts } = message
+  if (!("type" in message) || message.type !== "accounts" || !("accounts" in message) || !("signedIn" in message)) return undefined
+  const { accounts, signedIn } = message
   if (!Array.isArray(accounts) || !accounts.every((line) => typeof line === "string")) return undefined
-  return accounts
+  if (typeof signedIn !== "object" || signedIn === null) return undefined
+  if (!("prismic" in signedIn) || !("chatgpt" in signedIn)) return undefined
+  if (typeof signedIn.prismic !== "boolean" || typeof signedIn.chatgpt !== "boolean") return undefined
+  return { lines: accounts, signedIn: { prismic: signedIn.prismic, chatgpt: signedIn.chatgpt } }
 }
 
 // The daemon's answer to a sign_in request: the URL to open in the browser (src/cli.ts).

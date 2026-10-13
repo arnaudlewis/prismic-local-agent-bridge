@@ -24,6 +24,8 @@ import { createPrismicAuth, forgetPrismicSignIn } from "./prismic/prismicAuth.ts
 import { createRateLimiter } from "./rateLimit.ts"
 import { createApiKeyVault, createDefaultSecretStores } from "./secrets/apiKeyVault.ts"
 import { passEnvNamePattern, withheldProxyNames } from "./conversations/childEnv.ts"
+import { describePrismic, signedInAccounts } from "./accountsReport.ts"
+import type { SignedInAccounts } from "./accountsReport.ts"
 import { bridgeInfo } from "./protocol.ts"
 import { resolveProjectDir } from "./workspace.ts"
 import { createWindowChannels } from "./windowChannels.ts"
@@ -220,9 +222,9 @@ async function main(): Promise<void> {
     }
     collectingAccounts = true
     void describeAccounts()
-      .then((accounts) => {
+      .then(({ lines, signedIn }) => {
         // A newer collection is already queued (an account changed meanwhile): this snapshot is out of date.
-        if (!accountsRequestedAgain && process.connected) process.send?.({ type: "accounts", accounts })
+        if (!accountsRequestedAgain && process.connected) process.send?.({ type: "accounts", accounts: lines, signedIn })
       })
       .finally(() => {
         setTimeout(() => {
@@ -234,15 +236,15 @@ async function main(): Promise<void> {
       })
   }
 
-  async function describeAccounts(): Promise<string[]> {
+  async function describeAccounts(): Promise<{ lines: string[]; signedIn: SignedInAccounts }> {
     const users = prismicAuth.signedInUsers()
-    const lines = [users.length === 0 ? "Prismic: not signed in" : `Prismic: signed in as ${users.join(", ")}`]
+    const lines = [describePrismic(users)]
     for (const provider of providers) {
       if (provider.accountSummary !== undefined) {
         lines.push(await provider.accountSummary(accountsAbort.signal).catch(() => `${provider.label}: unknown`))
       }
     }
-    return lines
+    return { lines, signedIn: signedInAccounts({ prismicUsers: users, chatgpt: chatgptAuth.getStatus().status }) }
   }
 
   let shuttingDown = false
