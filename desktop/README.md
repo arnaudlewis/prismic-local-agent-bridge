@@ -61,7 +61,7 @@ Other things to expect:
 - A browser asks to let the Page Builder "access apps on your device" (Chrome, Edge): click **Allow**. The panel talks
   to the app on `http://127.0.0.1:7878`.
 - Safari cannot be used with a deployed (https) Page Builder: it blocks every request from an https page to
-  `127.0.0.1` (WebKit bug 171934). Use Chrome, Edge, Arc or Firefox. The panel says so.
+  `127.0.0.1` (WebKit bug 171934). Use Chrome. The panel says so.
 - macOS may ask once to let the Claude program read an item of your Keychain (Claude Code demo mode only, see
   below). Click **Allow**.
 - A Mac without the Xcode Command Line Tools may offer to install them the first time an agent runs `git`.
