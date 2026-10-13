@@ -235,7 +235,9 @@ Silicon runner (`macos-15`). It needs no secret besides the `GITHUB_TOKEN` GitHu
    ```
 
 4. **Watch the run** (Actions tab, or `gh run watch`). It checks the tag against `desktop/package.json`, runs the
-   daemon's checks and tests, builds the app, and publishes a GitHub Release with the dmg and its block map.
+   daemon's checks and tests, builds the app (`npm run dist`), then creates the GitHub Release once with `gh` and
+   uploads the dmg, its block map and `latest-mac.yml` to it. If a run fails halfway, re-run it: the upload replaces
+   what is already there.
 5. **Verify the result:**
 
    ```sh

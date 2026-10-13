@@ -19,8 +19,15 @@ jobs:
         run: test "v$(node -p 'require("./desktop/package.json").version')" = "$GITHUB_REF_NAME"
       - name: Check and test the daemon
         run: npm ci && npm run check && npm test
-      - name: Build and publish the app
+      - name: Build the app
         working-directory: desktop
-        run: npm ci && npm run release
+        run: npm ci && npm run dist
+      # electron-builder publishes each file from its own publisher, and two of them can each create the release for
+      # the tag: the files end up split across two releases and the download link 404s. One `gh` call creates it once.
+      - name: Publish the release
+        working-directory: desktop/release
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "${GITHUB_REF_NAME#v}" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" Prismic-Agent-mac-arm64.dmg Prismic-Agent-mac-arm64.dmg.blockmap latest-mac.yml --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
