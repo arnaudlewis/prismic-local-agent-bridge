@@ -68,6 +68,8 @@ export interface Conversation {
   generation: number
   // Set once a prompt has been accepted: an agent that never got one has nothing to resume.
   resumeSessionId: string | undefined
+  // The version of the preamble the agent's session has seen (see preamble.ts); undefined for a session that predates it.
+  preambleVersion: number | undefined
   // The document the window showed when the latest prompt was sent: passed to get_editor_context on that turn's reads.
   // It follows the editor from message to message, so it is not stored.
   pinnedDocumentId: string | undefined

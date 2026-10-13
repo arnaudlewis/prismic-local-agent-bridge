@@ -42,6 +42,7 @@ export function getConversation(ctx: Context, session: Session): Conversation {
     lastActiveAt: 0,
     generation: 0,
     resumeSessionId: stored?.acpSessionId,
+    preambleVersion: stored?.preambleVersion,
     pinnedDocumentId: undefined,
     title: stored === undefined ? undefined : storedTitle(stored.title, stored.events),
     updatedAt: stored?.updatedAt ?? Date.now(),

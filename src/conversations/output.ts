@@ -172,6 +172,7 @@ export function flushSave(ctx: Context, conversation: Conversation): void {
       agent: conversation.agent,
       repository: redact(ctx, conversation.repository),
       acpSessionId: conversation.resumeSessionId,
+      preambleVersion: conversation.preambleVersion,
       title: conversation.title === undefined ? undefined : redact(ctx, conversation.title),
       updatedAt: conversation.updatedAt,
       events,

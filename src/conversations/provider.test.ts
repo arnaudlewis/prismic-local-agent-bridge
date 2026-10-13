@@ -50,9 +50,11 @@ describe("the conversation machinery goes through the provider", () => {
 
     await harness.agents.handleMessage(windowId, { type: "chat_prompt", text: "/status", session })
 
-    // Not native for this provider: the preamble goes before the user's text like for any regular prompt.
-    expect(prompted(harness.events)).toHaveLength(2)
+    // Not native for this provider: the preamble goes before the user's text like for any regular prompt, and the
+    // line about the open document goes after it.
+    expect(prompted(harness.events)).toHaveLength(3)
     expect(prompted(harness.events)[0]).toContain("You are running inside")
+    expect(prompted(harness.events)[2]).toContain("when this message was sent")
   })
 
   it("filters the command list with the provider's blocked and hidden commands", async () => {

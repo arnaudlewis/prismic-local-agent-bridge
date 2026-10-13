@@ -174,8 +174,10 @@ function handlePrompt(message: Message): void {
   }
   think()
   const blocks = message.params?.prompt ?? []
-  // The bridge appends a one-line reminder after the user's text on regular prompts; the user's text is the block before it.
-  const text = blocks.filter((block) => !block.text.startsWith("Reminder: call get_editor_context")).at(-1)?.text ?? ""
+  // After the user's text the bridge appends, on regular prompts, a line about the document the page had open and
+  // maybe the editor context block; the user's text is the last block that is not one of those.
+  const addedByTheBridge = ["Document open in the window when", "No document was open in the window", "[Editor context read by the bridge"]
+  const text = blocks.filter((block) => !addedByTheBridge.some((start) => block.text.startsWith(start))).at(-1)?.text ?? ""
   // The names (never the values) of the environment this process was started with.
   if (text.startsWith("dump-env-names")) {
     const names = Object.keys(process.env).filter((name) => !name.startsWith("__CF_")).sort()

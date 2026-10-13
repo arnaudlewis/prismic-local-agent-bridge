@@ -141,9 +141,10 @@ describe("a conversation with the Claude agent", () => {
 
     await harness.agents.handleMessage(claudeChannel, { type: "chat_prompt", text: "/ context", session: claudeSession })
 
-    expect(prompted(harness.events)).toHaveLength(2)
+    expect(prompted(harness.events)).toHaveLength(3)
     expect(prompted(harness.events)[0]).toContain("mcp__prismic__<tool>")
     expect(prompted(harness.events)[1]).toBe("/ context")
+    expect(prompted(harness.events)[2]).toContain("when this message was sent")
   })
 
   it("catches the editor context from the way Claude reports an MCP call, once", async () => {

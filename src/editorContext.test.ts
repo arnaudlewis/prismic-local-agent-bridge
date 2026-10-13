@@ -65,12 +65,13 @@ describe("buildEditorContextBlock", () => {
   it("does not touch a small block", () => {
     const block = buildEditorContextBlock(
       { status: "no_pin", detected: { document: { id: "DOC1", title: "Home", focusedSlice: { name: "Hero", paths: ["a", "b"] } } } },
-      undefined,
+      "DOC1",
     )
 
     expect(JSON.parse((block ?? "").slice(header.length + 1))).toEqual({
       status: "no_pin",
       ambiguous: false,
+      pinnedDocumentId: "DOC1",
       document: { id: "DOC1", title: "Home" },
       focusedSlice: { name: "Hero", paths: ["a", "b"] },
     })
@@ -79,10 +80,38 @@ describe("buildEditorContextBlock", () => {
   it("tells the agent to fetch the whole page content when no slice is focused, and only then", () => {
     const payloadOf = (document: object) =>
       JSON.parse(
-        (buildEditorContextBlock({ status: "no_pin", detected: { document } }, undefined) ?? "").slice(header.length + 1),
+        (buildEditorContextBlock({ status: "no_pin", detected: { document } }, "DOC1") ?? "").slice(header.length + 1),
       ) as { note?: string }
 
     expect(payloadOf({ id: "DOC1", title: "Home" }).note).toMatch(/includeDocumentContent: true/)
     expect(payloadOf({ id: "DOC1", title: "Home", focusedSlice: { name: "Hero", paths: ["a"] } }).note).toBeUndefined()
+  })
+
+  // The page publishes what it shows with a delay, so the MCP can still hold the document the user just left.
+  describe("a document other than the one the page says is open", () => {
+    const payloadOf = (result: object, pinnedDocumentId: string | undefined) =>
+      JSON.parse((buildEditorContextBlock(result, pinnedDocumentId) ?? "").slice(header.length + 1)) as Record<string, unknown>
+    const stale = { status: "no_pin", detected: { document: { id: "DOC1", title: "Home", focusedSlice: { name: "Hero" } } } }
+
+    it("is left out when the page has none open", () => {
+      expect(payloadOf(stale, undefined)).toEqual({ status: "no_pin", ambiguous: false })
+    })
+
+    it("is left out when the page has another one open", () => {
+      expect(payloadOf(stale, "DOC2")).toEqual({ status: "no_pin", ambiguous: false, pinnedDocumentId: "DOC2" })
+    })
+
+    it("keeps the pinned document and what the window shows instead when they differ", () => {
+      const payload = payloadOf(
+        {
+          status: "context_changed",
+          pinned: { documentId: "DOC1", window: { document: { id: "DOC1", title: "Home" } } },
+          detected: { document: { id: "DOC2", title: "About" } },
+        },
+        "DOC1",
+      )
+
+      expect(payload).toMatchObject({ document: { id: "DOC1" }, detected: { id: "DOC2", title: "About" } })
+    })
   })
 })

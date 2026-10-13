@@ -5,7 +5,7 @@ import { ensureAgent } from "./agentProcess.ts"
 import { blockedCommandName, blockedCommandNotice, isNativeCommand } from "./commands.ts"
 import { providerOf } from "./context.ts"
 import type { Context } from "./context.ts"
-import { buildPreamble } from "./preamble.ts"
+import { buildPreamble, buildPromptDocumentLine, preambleVersion } from "./preamble.ts"
 import { attachWindow, getConversation } from "./registry.ts"
 import { refreshIdleTimer } from "./idle.ts"
 import { emit, flushHeldText, flushSave, notify, pushThreads, record, redact, scheduleSave, setStatus } from "./output.ts"
@@ -78,13 +78,16 @@ export async function handleChatPrompt(
     }
 
     // The agent only parses a native command from the first text block: the user's text stays first, the preamble
-    // goes before it only on a regular prompt, and the context block after it (never recorded, never shown).
+    // goes before it only on a regular prompt, and the document line and the context block after it (never recorded,
+    // never shown). The line comes from the page, so it is there even when the context read failed.
     const prompt = [{ type: "text" as const, text: message.text }]
     if (isRegularPrompt) {
+      prompt.push({ type: "text", text: buildPromptDocumentLine(message.session) })
       if (contextBlock !== undefined) prompt.push({ type: "text", text: contextBlock })
       if (!agent.preambleSent) {
         prompt.unshift({ type: "text", text: buildPreamble(message.session, provider.preambleAdditions?.()) })
         agent.preambleSent = true
+        conversation.preambleVersion = preambleVersion
       }
     }
     agent.promptInFlight = true

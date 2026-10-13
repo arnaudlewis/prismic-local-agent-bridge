@@ -112,16 +112,20 @@ const noSliceFocusedNote =
   "No slice is focused, so this block has no field paths. Before editing, call get_editor_context with includeDocumentContent: true (and pinnedDocumentId) to get the whole page content and every field path."
 
 // A compact, fixed-shape view of the tool result for the model: no draft content, no slice item, no other windows.
+// `pinnedDocumentId` is the document the page says is open (undefined: none). The MCP can hold an older state than the
+// page, which publishes with a delay: whatever it says about another document is left out, so it can't contradict
+// the page's own line (see buildPromptDocumentLine).
 export function buildEditorContextBlock(result: unknown, pinnedDocumentId: string | undefined): string | undefined {
   const parsed = EditorContextResultSchema.safeParse(result)
   if (!parsed.success) return undefined
   const { status, detected } = parsed.data
-  const document = workingDocument(parsed.data)
+  const working = workingDocument(parsed.data)
+  const document = working !== undefined && working.id === pinnedDocumentId ? working : undefined
   const pinnedId = pinnedDocumentId ?? parsed.data.pinned?.documentId
 
   const slice = document?.focusedSlice
   const field = document?.focusedField
-  const shown = detected?.document
+  const shown = document === undefined ? undefined : detected?.document
   const payload = {
     status,
     ambiguous: parsed.data.ambiguous ?? false,

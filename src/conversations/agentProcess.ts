@@ -16,6 +16,7 @@ import type { Context } from "./context.ts"
 import { refreshIdleTimer } from "./idle.ts"
 import { flushHeldText, notify, scheduleSave, sendLive, setStatus } from "./output.ts"
 import { requestPermission } from "./permissions.ts"
+import { preambleVersion } from "./preamble.ts"
 import { makeRoomForAgent } from "./registry.ts"
 import { applyInitialConfig, applySelectedConfig, sendAgentState } from "./sessionConfig.ts"
 import { handleSessionUpdate } from "./sessionUpdates.ts"
@@ -310,7 +311,9 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
       agent.configOptions = created.configOptions ?? []
       await applyInitialConfig(provider.initialConfig?.() ?? {}, agent)
     }
-    agent.preambleSent = resumed
+    // A resumed session already holds the preamble it was given; if that one is older than the current, the next
+    // prompt sends the current one, which says it replaces the earlier instructions.
+    agent.preambleSent = resumed && conversation.preambleVersion === preambleVersion
     console.info(
       `[agent/start] agent=${provider.id} initializeMs=${initializedAt - startedAt} sessionMs=${Date.now() - initializedAt} resumed=${resumed}`,
     )

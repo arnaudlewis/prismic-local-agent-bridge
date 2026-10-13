@@ -189,6 +189,35 @@ describe("persistent conversations", () => {
     expect(live).not.toContain("You are running inside")
   })
 
+  it("sends the current preamble again when it resumes a session that saw an older one", async () => {
+    const first = createHarness()
+    await first.agents.handleMessage(windowA, { type: "chat_open", session })
+    await first.agents.handleMessage(windowA, { type: "chat_prompt", text: "first", session })
+    first.agents.stopAll()
+
+    const file = conversationFile(first)
+    const stored = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>
+    expect(stored.preambleVersion).toEqual(expect.any(Number))
+    // A file written before the preamble had a version: its session holds the earlier instructions.
+    delete stored.preambleVersion
+    writeFileSync(file, JSON.stringify(stored))
+
+    const second = createHarness({ dataDir: first.dataDir })
+    await second.agents.handleMessage(windowB, { type: "chat_open", session })
+    await second.agents.handleMessage(windowB, { type: "chat_prompt", text: "next", session })
+
+    const live = liveAgentText(second.eventsFor(windowB))
+    expect(live).toContain(`ctx:load:${windowB}`)
+    expect(live).toContain("You are running inside")
+
+    // Once it has been sent, a restart doesn't send it again.
+    second.agents.stopAll()
+    const third = createHarness({ dataDir: first.dataDir })
+    await third.agents.handleMessage(windowC, { type: "chat_open", session })
+    await third.agents.handleMessage(windowC, { type: "chat_prompt", text: "last", session })
+    expect(liveAgentText(third.eventsFor(windowC))).not.toContain("You are running inside")
+  })
+
   it("persists a transcript that a restart marks as unresolved permissions cancelled", async () => {
     const first = createHarness()
     await first.agents.handleMessage(windowA, { type: "chat_open", session })
