@@ -35,6 +35,9 @@ interface StartBridgeServerArgs {
   pairing: Pairing
   prismicAuth: PrismicAuth
   channels: WindowChannels
+  // Called after a request that signs an account in or out (the agents' sign-in and sign-out routes, the Prismic
+  // OAuth callback): whoever shows the accounts (the desktop app) learns about it now, not at its next refresh.
+  onAccountsMayHaveChanged?: () => void
 }
 
 export interface BridgeServer {
@@ -42,7 +45,7 @@ export interface BridgeServer {
 }
 
 export async function startBridgeServer(args: StartBridgeServerArgs): Promise<BridgeServer> {
-  const { port, extraOrigins, projectDir, providers, routes, pairing, prismicAuth, channels } = args
+  const { port, extraOrigins, projectDir, providers, routes, pairing, prismicAuth, channels, onAccountsMayHaveChanged } = args
   const customRoutes = [...routes, ...providers.flatMap((provider) => provider.routes?.() ?? [])]
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -103,14 +106,19 @@ export async function startBridgeServer(args: StartBridgeServerArgs): Promise<Br
   }
 
   const server = createServer((req, res) => {
-    route(req, res).catch((error: unknown) => {
-      if (error instanceof HttpError) {
-        sendJson(res, error.status, { error: error.message })
-        return
-      }
-      console.error(`Request failed: ${error instanceof Error ? error.message : String(error)}`)
-      sendJson(res, 500, { error: "internal_error" })
-    })
+    route(req, res)
+      .catch((error: unknown) => {
+        if (error instanceof HttpError) {
+          sendJson(res, error.status, { error: error.message })
+          return
+        }
+        console.error(`Request failed: ${error instanceof Error ? error.message : String(error)}`)
+        sendJson(res, 500, { error: "internal_error" })
+      })
+      // Whether it worked or not: a sign-in that failed half way can still have changed who is signed in.
+      .finally(() => {
+        if (changesAccounts(req, port)) onAccountsMayHaveChanged?.()
+      })
   })
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: maxWebSocketPayloadBytes })
@@ -194,4 +202,13 @@ function requireToken(req: IncomingMessage, pairing: Pairing): PairedBrowser {
   const paired = token === undefined ? undefined : pairing.validateToken(token, req.headers.origin)
   if (paired === undefined) throw new HttpError(401, "unauthorized")
   return paired
+}
+
+// The routes that sign an account in or out: /auth/* (ChatGPT sign-in and sign-out, its callback, the Claude key),
+// /oauth/* (the Prismic callback) and /prismic/sign-out.
+function changesAccounts(req: IncomingMessage, port: number): boolean {
+  if (req.method === "OPTIONS") return false
+  const pathname = parseOriginFormUrl(req.url, port)?.pathname
+  if (pathname === undefined) return false
+  return pathname.startsWith("/auth/") || pathname.startsWith("/oauth/") || pathname === "/prismic/sign-out"
 }

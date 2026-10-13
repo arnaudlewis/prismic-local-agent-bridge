@@ -185,6 +185,7 @@ async function main(): Promise<void> {
     pairing,
     prismicAuth,
     channels,
+    onAccountsMayHaveChanged: publishAccounts,
   }).catch((error: unknown) => exitWhenPortInUse(error, options.port))
 
   console.info(`${bridgeInfo.name} ${bridgeInfo.version}`)

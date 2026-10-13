@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import WebSocket from "ws"
 
-import type { AgentProvider } from "./agents/provider.ts"
+import type { AgentProvider, ProviderRoute } from "./agents/provider.ts"
 import { startBridgeServer } from "./bridgeServer.ts"
 import type { BridgeServer } from "./bridgeServer.ts"
 import { createPairing } from "./pairing.ts"
@@ -663,5 +663,97 @@ describe("one socket per window and agent", () => {
     expect(await claude.closed).toBe(4401)
     expect(await codex.closed).toBe(4401)
     expect(received).toEqual([])
+  })
+})
+
+describe("telling whoever shows the accounts that one changed", () => {
+  async function startWithCounter(routes: ProviderRoute[] = []) {
+    const pairing = createPairing({})
+    const port = await freePort()
+    const calls: string[] = []
+    servers.push(
+      await startBridgeServer({
+        port,
+        extraOrigins: [origin],
+        projectDir: "/tmp",
+        providers: [],
+        routes,
+        pairing,
+        prismicAuth: createFakePrismic().auth,
+        channels: createWindowChannels(),
+        onAccountsMayHaveChanged: () => calls.push("changed"),
+      }),
+    )
+    return { port, token: pairToken(pairing), calls }
+  }
+
+  const signOutRoute: ProviderRoute = {
+    method: "POST",
+    path: "/auth/chatgpt/sign-out",
+    auth: "bearer",
+    handle: ({ res }) => {
+      res.writeHead(204)
+      res.end()
+    },
+  }
+  const callbackRoute: ProviderRoute = {
+    method: "GET",
+    path: "/auth/callback",
+    auth: "none",
+    originExempt: true,
+    handle: ({ res }) => {
+      res.writeHead(200)
+      res.end()
+    },
+  }
+  const failingRoute: ProviderRoute = {
+    method: "POST",
+    path: "/auth/claude/key",
+    auth: "bearer",
+    handle: () => {
+      throw new Error("the sign-in broke half way")
+    },
+  }
+
+  it("does so after the sign-in and sign-out routes of the agents and of Prismic, which the page can reach", async () => {
+    const { port, token, calls } = await startWithCounter([signOutRoute, callbackRoute])
+
+    await fetch(`http://127.0.0.1:${port}/auth/chatgpt/sign-out`, { method: "POST", ...authorized(token) })
+    expect(calls).toHaveLength(1)
+
+    await fetch(`http://127.0.0.1:${port}/auth/callback?code=x&state=y`)
+    expect(calls).toHaveLength(2)
+
+    await fetch(`http://127.0.0.1:${port}/prismic/sign-out`, { method: "POST", ...authorized(token) })
+    expect(calls).toHaveLength(3)
+  })
+
+  it("does so even when the request failed: a sign-in that broke half way may have changed who is signed in", async () => {
+    const { port, token, calls } = await startWithCounter([failingRoute])
+
+    const response = await fetch(`http://127.0.0.1:${port}/auth/claude/key`, { method: "POST", ...authorized(token) })
+
+    expect(response.status).toBe(500)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("does so for a request that was refused too, which costs nothing: the app throttles its own refresh", async () => {
+    const { port, calls } = await startWithCounter([signOutRoute])
+
+    const response = await fetch(`http://127.0.0.1:${port}/auth/chatgpt/sign-out`, { method: "POST", headers: { Origin: origin } })
+
+    expect(response.status).toBe(401)
+    expect(calls).toHaveLength(1)
+  })
+
+  it("stays quiet for everything else: reading the status, the health, a preflight, an unknown path", async () => {
+    const { port, token, calls } = await startWithCounter([signOutRoute])
+
+    await fetch(`http://127.0.0.1:${port}/status`, authorized(token))
+    await fetch(`http://127.0.0.1:${port}/health`)
+    await fetch(`http://127.0.0.1:${port}/auth/chatgpt/sign-out`, { method: "OPTIONS", headers: { Origin: origin } })
+    await fetch(`http://127.0.0.1:${port}/nothing-here`, authorized(token))
+
+    expect(calls).toEqual([])
   })
 })
