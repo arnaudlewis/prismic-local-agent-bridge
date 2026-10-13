@@ -35,7 +35,6 @@ const StoredConversationSchema = z.object({
   agent: AgentIdSchema.default(legacyAgent),
   repository: z.string().max(200),
   acpSessionId: z.string().max(1000).optional(),
-  pinnedDocumentId: z.string().max(300).optional(),
   title: z.string().max(200).optional(),
   updatedAt: z.number(),
   events: z.array(HistoryEventSchema).max(5000),

@@ -49,10 +49,8 @@ export async function handleChatPrompt(
 
   record(ctx, conversation, { type: "user_message", text: message.text })
   conversation.resumeSessionId = agent.sessionId
-  if (conversation.pinnedDocumentId === undefined && message.session.document !== undefined) {
-    conversation.pinnedDocumentId = message.session.document.id
-    scheduleSave(ctx, conversation)
-  }
+  // The document the window shows now is the one this turn is about, whatever the earlier messages were about.
+  conversation.pinnedDocumentId = message.session.document?.id
   conversation.updatedAt = Date.now()
   if (conversation.title === undefined) {
     // The thread appears in the list as soon as it has a first message.

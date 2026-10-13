@@ -68,7 +68,8 @@ export interface Conversation {
   generation: number
   // Set once a prompt has been accepted: an agent that never got one has nothing to resume.
   resumeSessionId: string | undefined
-  // The document the preamble pins for this conversation: passed to get_editor_context on every per-turn read.
+  // The document the window showed when the latest prompt was sent: passed to get_editor_context on that turn's reads.
+  // It follows the editor from message to message, so it is not stored.
   pinnedDocumentId: string | undefined
   // Set once, from the first user message; a conversation without one is never listed.
   title: string | undefined

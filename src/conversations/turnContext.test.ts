@@ -297,33 +297,23 @@ describe("per-turn editor context read", () => {
     const file = join(harness.dataDir, "conversations", `${conversationId}.json`)
     await vi.waitFor(() => expect(existsSync(file)).toBe(true))
     const stored = JSON.parse(readFileSync(file, "utf8")) as {
-      pinnedDocumentId?: string
       events: Array<{ type: string; text?: string }>
     }
     expect(stored.events.filter((event) => event.type === "user_message")).toEqual([
       { type: "user_message", text: "what is here?" },
     ])
-    expect(stored.pinnedDocumentId).toBe("DOC1")
   })
 
-  it("keeps the pinned document across a daemon restart", async () => {
-    const first = await setup()
-    await prompt(first.harness, first.stubSession, "one")
-    first.harness.agents.stopAll()
+  it("reads the context of the document the window shows at each prompt, not of the first one", async () => {
+    const { stub, harness, stubSession } = await setup()
+    await prompt(harness, stubSession, "one")
+    stub.requests.length = 0
 
-    const second = createHarness({
-      readEditorContext: true,
-      contextReadTimeoutMs: 2000,
-      dataDir: first.harness.dataDir,
-      mcpOrigin: new URL(first.stub.url).origin,
-      prismicAccessToken: secretToken,
-    })
-    const withoutDocument: Session = { ...first.stubSession, document: undefined }
-    await second.agents.handleMessage(windowB, { type: "chat_open", session: withoutDocument })
-    first.stub.requests.length = 0
-    await second.agents.handleMessage(windowB, { type: "chat_prompt", text: "two", session: withoutDocument })
+    await prompt(harness, { ...stubSession, document: { id: "DOC2", title: "About" } }, "two")
+    expect(stub.requests[0]?.body.params?.arguments).toEqual({ pinnedDocumentId: "DOC2" })
 
-    expect(first.stub.requests[0]?.body.params?.arguments).toEqual({ pinnedDocumentId: "DOC1" })
+    await prompt(harness, { ...stubSession, document: undefined }, "three")
+    expect(stub.requests[1]?.body.params?.arguments).toEqual({})
   })
 
   it("never logs the token", async () => {
