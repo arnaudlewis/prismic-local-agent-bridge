@@ -3,7 +3,7 @@ import type { SessionNotification } from "@agentclientprotocol/sdk"
 import type { Context } from "./context.ts"
 import { providerOf } from "./context.ts"
 import { offeredCommands } from "./commands.ts"
-import { emit } from "./output.ts"
+import { emit, emitThought } from "./output.ts"
 import { sendAvailableCommands, sendSessionConfig } from "./sessionConfig.ts"
 import { handleToolOutput } from "./turnContext.ts"
 import type { AgentFields, Conversation } from "./types.ts"
@@ -25,6 +25,10 @@ export function handleSessionUpdate(
   }
   if (agent.replaying) return
   switch (update.sessionUpdate) {
+    case "agent_thought_chunk":
+      if (update.content.type !== "text") return
+      emitThought(ctx, conversation, { text: update.content.text, messageId: update.messageId ?? undefined })
+      return
     case "agent_message_chunk":
       if (update.content.type !== "text") return
       emit(ctx, conversation, {

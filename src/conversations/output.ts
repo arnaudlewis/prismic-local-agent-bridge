@@ -52,8 +52,50 @@ export function emit(ctx: Context, conversation: Conversation, event: RecordedBr
 // out now, redacted if it starts like a key and as it is otherwise.
 export function flushHeldText(ctx: Context, conversation: Conversation): void {
   const redactor = ctx.redactors.get(conversation.id)
-  if (redactor === undefined) return
-  for (const piece of redactor.flushAll(knownSecrets(ctx))) deliver(ctx, conversation, chunkOf(piece))
+  if (redactor !== undefined) {
+    for (const piece of redactor.flushAll(knownSecrets(ctx))) deliver(ctx, conversation, chunkOf(piece))
+  }
+  const thoughts = ctx.redactors.get(thoughtKey(conversation))
+  if (thoughts !== undefined) deliverThoughts(ctx, conversation, thoughts.flushAll(knownSecrets(ctx)))
+}
+
+function thoughtChunkOf(piece: { messageId: string | undefined; text: string }): BridgeEvent {
+  return { type: "agent_thought_chunk", text: piece.text, ...(piece.messageId === undefined ? {} : { messageId: piece.messageId }) }
+}
+
+// What a turn may send of the agent's reasoning: a model that thinks without end, or a faulty agent, must not keep the
+// daemon serializing and a slow browser queueing forever. Past it the rest of the turn's reasoning is dropped (the
+// sanitizer still sees it, so the stream stays consistent); the messages are not affected.
+export const maxThoughtBytesPerTurn = 512 * 1024
+
+// The agent's reasoning. It is live only: never recorded, never replayed, so it is not in the transcript on disk. Every
+// chunk goes through its own redactor (apart from the one of the messages, whose held tails are keyed by message id)
+// whether or not the browser asked to see it: the sanitizer must have seen the beginning of a key to recognize its end,
+// so the setting (which the page can change in the middle of a turn) only decides what is delivered, never what is
+// sanitized.
+export function emitThought(ctx: Context, conversation: Conversation, event: { text: string; messageId?: string }): void {
+  touch(ctx, conversation)
+  const key = thoughtKey(conversation)
+  let redactor = ctx.redactors.get(key)
+  if (redactor === undefined) {
+    redactor = createMessageRedactor()
+    ctx.redactors.set(key, redactor)
+  }
+  deliverThoughts(ctx, conversation, redactor.push(event.messageId, event.text, knownSecrets(ctx)))
+}
+
+// The one place thoughts leave the daemon: the setting of the session that is attached now, and the budget of the turn.
+function deliverThoughts(ctx: Context, conversation: Conversation, pieces: Array<{ messageId: string | undefined; text: string }>): void {
+  if (!conversation.showReasoning) return
+  for (const piece of pieces) {
+    if (conversation.thoughtBytes >= maxThoughtBytesPerTurn) return
+    conversation.thoughtBytes += Buffer.byteLength(piece.text)
+    sendLive(ctx, conversation, thoughtChunkOf(piece))
+  }
+}
+
+export function thoughtKey(conversation: Conversation): string {
+  return `${conversation.id}#thought`
 }
 
 function chunkOf(piece: { messageId: string | undefined; text: string }): RecordedBridgeEvent {
@@ -86,7 +128,15 @@ export function notify(ctx: Context, conversation: Conversation, tone: "info" | 
 }
 
 export function setStatus(ctx: Context, conversation: Conversation, status: "idle" | "starting" | "running"): void {
-  sendLive(ctx, conversation, { type: "chat_status", status })
+  if (status === "idle") {
+    conversation.busySince = undefined
+    conversation.thoughtBytes = 0
+    sendLive(ctx, conversation, { type: "chat_status", status })
+    return
+  }
+  // Starting, then running, is one busy period: the clock keeps its start.
+  conversation.busySince ??= Date.now()
+  sendLive(ctx, conversation, { type: "chat_status", status, elapsedMs: Date.now() - conversation.busySince })
 }
 
 export function currentStatus(conversation: Conversation): "idle" | "running" {

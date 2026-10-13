@@ -76,6 +76,13 @@ export interface Conversation {
   updatedAt: number
   // Set by chat_delete: nothing may write this conversation to disk anymore.
   deleted: boolean
+  // When the conversation became busy (starting, then running), until it is idle: the daemon owns this clock so that a
+  // browser that reloads mid-turn shows the real time, not zero.
+  busySince: number | undefined
+  // The browser asks to see the agent's reasoning (session.showReasoning): when it doesn't, none of it is sent.
+  showReasoning: boolean
+  // How much reasoning was sent in this busy period (see maxThoughtBytesPerTurn).
+  thoughtBytes: number
   lastContextNoticeAt: number | undefined
   transcript: Transcript
   // JSON of the last editor_context event, to emit only when the summary changes.

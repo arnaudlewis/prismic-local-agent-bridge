@@ -129,7 +129,46 @@ function misbehave(): void {
   }, 300)
 }
 
+// FAKE_AGENT_THOUGHTS="first|second": the agent's reasoning, sent in these pieces before anything else of every turn, as
+// one thought message (FAKE_AGENT_THOUGHT_ID, "thought-1" by default, "none" for pieces without a message id).
+// "@pad:<n>" stands for n harmless characters, and FAKE_AGENT_THOUGHT_REPEAT=<n> sends the whole list n times: a stream
+// too large to put in an environment variable.
+function thoughtPieces(): string[] {
+  const pieces = (process.env.FAKE_AGENT_THOUGHTS?.split("|") ?? []).map((piece) => {
+    const pad = /^@pad:(\d+)$/.exec(piece)
+    return pad === null ? piece : "x".repeat(Number(pad[1]))
+  })
+  return Array.from({ length: Number(process.env.FAKE_AGENT_THOUGHT_REPEAT ?? 1) }, () => pieces).flat()
+}
+
+function thought(text: string): void {
+  const id = process.env.FAKE_AGENT_THOUGHT_ID ?? "thought-1"
+  const messageId = id === "none" ? undefined : id
+  notify({ sessionUpdate: "agent_thought_chunk", messageId, content: { type: "text", text } })
+}
+
+function think(): void {
+  for (const text of thoughtPieces()) thought(text)
+}
+
+// "think-slowly": the same pieces FAKE_AGENT_THOUGHT_DELAY_MS apart (the first at once), then a reply and the end of the
+// turn: a window can change what it asks for between two of them.
+function thinkSlowly(message: Message): void {
+  const pieces = thoughtPieces()
+  const delay = Number(process.env.FAKE_AGENT_THOUGHT_DELAY_MS ?? 0)
+  pieces.forEach((text, index) => setTimeout(() => thought(text), index * delay))
+  setTimeout(() => {
+    chunk("slow-reply")
+    respond(message.id, { stopReason: "end_turn" })
+  }, pieces.length * delay)
+}
+
 function handlePrompt(message: Message): void {
+  if ((message.params?.prompt ?? []).some((block) => block.text.startsWith("think-slowly"))) {
+    thinkSlowly(message)
+    return
+  }
+  think()
   const blocks = message.params?.prompt ?? []
   // The bridge appends a one-line reminder after the user's text on regular prompts; the user's text is the block before it.
   const text = blocks.filter((block) => !block.text.startsWith("Reminder: call get_editor_context")).at(-1)?.text ?? ""

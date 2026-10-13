@@ -54,6 +54,10 @@ export const fakeAgentEnvNames = [
   "FAKE_AGENT_SECRET",
   "FAKE_AGENT_SLOW_CONFIG_MS",
   "FAKE_AGENT_START_LOG",
+  "FAKE_AGENT_THOUGHT_DELAY_MS",
+  "FAKE_AGENT_THOUGHT_REPEAT",
+  "FAKE_AGENT_THOUGHT_ID",
+  "FAKE_AGENT_THOUGHTS",
 ]
 
 export interface CreateHarnessArgs {
@@ -156,6 +160,11 @@ export function agentText(events: HistoryEvent[]): string {
 
 export function liveAgentText(events: BridgeEvent[]): string {
   return events.flatMap((event) => (event.type === "agent_message_chunk" ? [event.text] : [])).join("")
+}
+
+// The agent's reasoning a window received, as the text it would show.
+export function thoughtText(events: BridgeEvent[]): string {
+  return events.flatMap((event) => (event.type === "agent_thought_chunk" ? [event.text] : [])).join("")
 }
 
 // The text blocks the fake agent says it was prompted with. A chunk ending in "s" is held back by the daemon until the

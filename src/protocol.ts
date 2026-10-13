@@ -18,6 +18,8 @@ const SessionSchema = z.object({
   agent: AgentIdSchema,
   conversationId: z.string().regex(conversationIdPattern),
   repository: z.string().min(1).max(200),
+  // Whether the browser shows the agent's reasoning: when it doesn't, the daemon doesn't send it.
+  showReasoning: z.boolean().optional(),
   document: z.object({ id: z.string().min(1).max(300), title: z.string().max(300) }).optional(),
 })
 
@@ -130,10 +132,14 @@ export interface ThreadSummary {
 export type BridgeEvent =
   | { type: "chat_history"; events: HistoryEvent[] }
   | { type: "threads"; threads: ThreadSummary[] }
-  | { type: "chat_status"; status: "idle" | "starting" | "running" }
+  // `elapsedMs` is how long the conversation has been busy, from the daemon's own clock: a page that reloads mid-turn
+  // asks again and keeps counting from the real start.
+  | { type: "chat_status"; status: "idle" | "starting" | "running"; elapsedMs?: number }
   | { type: "session_config"; options: BridgeConfigOption[] }
   | { type: "available_commands"; commands: BridgeCommand[] }
   | { type: "agent_message_chunk"; text: string; messageId?: string }
+  // The agent's reasoning, only when the session asked for it. Live only: it is never recorded, stored or replayed.
+  | { type: "agent_thought_chunk"; text: string; messageId?: string }
   | { type: "tool_call"; toolCallId: string; title: string; status: ToolCallStatus }
   | { type: "tool_call_update"; toolCallId: string; title?: string; status?: ToolCallStatus }
   | {

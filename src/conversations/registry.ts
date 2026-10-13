@@ -17,6 +17,7 @@ export function getConversation(ctx: Context, session: Session): Conversation {
   if (existing !== undefined) {
     assertSameAgent(existing.agent, session)
     existing.repository = session.repository
+    existing.showReasoning = session.showReasoning === true
     return existing
   }
   makeRoomInMemory(ctx)
@@ -45,6 +46,9 @@ export function getConversation(ctx: Context, session: Session): Conversation {
     title: stored === undefined ? undefined : storedTitle(stored.title, stored.events),
     updatedAt: stored?.updatedAt ?? Date.now(),
     deleted: false,
+    busySince: undefined,
+    showReasoning: session.showReasoning === true,
+    thoughtBytes: 0,
     lastContextNoticeAt: undefined,
     transcript,
     lastEditorContext: lastEditorContextKey(transcript.events()),
