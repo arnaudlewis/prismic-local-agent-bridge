@@ -1,7 +1,7 @@
 {
   "name": "prismic-agent-desktop",
   "productName": "Prismic Agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Menu bar app that keeps the Prismic local agent bridge running",
   "private": true,
   "type": "module",
