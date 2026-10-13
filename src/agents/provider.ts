@@ -21,6 +21,9 @@ export interface AgentProvider {
   // starting mode the bridge's choice rather than whatever the agent's own settings say. If it can't be applied, the
   // agent is not started: a mode that is too permissive must never be the fallback.
   initialConfig?(): Record<string, string>
+  // `_meta` of session/new and session/load, for what the agent's adapter reads from there. Claude uses it to ask for
+  // the text of its reasoning: recent models stream it empty unless asked.
+  sessionMeta?(): Record<string, unknown>
   // Notice sent when a stored agent session can't be resumed and a new one starts.
   readonly sessionRestartedNotice: string
   // The native agent binary when it is downloaded on first use (packaged app); absent when the provider needs none.

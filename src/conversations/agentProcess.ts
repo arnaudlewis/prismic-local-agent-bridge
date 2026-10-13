@@ -286,7 +286,12 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
         // The agent replays the whole history as updates; they are already in the transcript.
         agent.replaying = true
         try {
-          const loaded = await connection.loadSession({ sessionId: resumeSessionId, cwd: projectDir, mcpServers })
+          const loaded = await connection.loadSession({
+            sessionId: resumeSessionId,
+            cwd: projectDir,
+            mcpServers,
+            _meta: provider.sessionMeta?.(),
+          })
           agent.configOptions = loaded.configOptions ?? []
           resumed = true
         } catch (error) {
@@ -300,7 +305,7 @@ async function startAgent(args: StartAgentArgs): Promise<void> {
     }
     if (!resumed) {
       agent.sessionId = ""
-      const created = await connection.newSession({ cwd: projectDir, mcpServers })
+      const created = await connection.newSession({ cwd: projectDir, mcpServers, _meta: provider.sessionMeta?.() })
       agent.sessionId = created.sessionId
       agent.configOptions = created.configOptions ?? []
       await applyInitialConfig(provider.initialConfig?.() ?? {}, agent)

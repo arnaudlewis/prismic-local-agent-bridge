@@ -64,6 +64,10 @@ export function createClaudeProvider(args: ClaudeProviderArgs): AgentProvider {
     // new session starts in the mode that asks, whatever they say.
     initialConfig: () => ({ mode: "default" }),
 
+    // Recent Claude models default to thinking blocks with no text (display "omitted"): the reasoning only reaches the
+    // browser if the summary is asked for. The adapter spreads these options into the SDK's after its own.
+    sessionMeta: () => ({ claudeCode: { options: { thinking: { type: "adaptive", display: "summarized" } } } }),
+
     credentialEpoch: () => vault.credentialEpoch(),
     secretValues: () => vault.knownKeys(),
 

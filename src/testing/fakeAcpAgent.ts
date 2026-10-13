@@ -60,6 +60,7 @@ interface Message {
     value?: string
     prompt?: Array<{ text: string }>
     mcpServers?: Array<{ url?: string; headers: Array<{ name: string; value: string }> }>
+    _meta?: unknown
   }
 }
 
@@ -76,7 +77,10 @@ function captureWindowHeader(message: Message): void {
   // What the agent was given to reach the MCP: kept out of the chat, where the daemon redacts its own tokens.
   const authorization = headers.find((header) => header.name === "Authorization")?.value ?? ""
   if (process.env.FAKE_AGENT_MCP_LOG !== undefined) {
-    appendFileSync(process.env.FAKE_AGENT_MCP_LOG, `${JSON.stringify({ url: message.params?.mcpServers?.[0]?.url, authorization })}\n`)
+    appendFileSync(
+      process.env.FAKE_AGENT_MCP_LOG,
+      `${JSON.stringify({ url: message.params?.mcpServers?.[0]?.url, authorization, meta: message.params?._meta })}\n`,
+    )
   }
 }
 
