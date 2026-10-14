@@ -10,6 +10,8 @@ interface CreateTrayMenuArgs {
   getUpdate: () => AvailableUpdate | undefined
   // Demo only: Claude on the Claude Code login of this Mac.
   claudeCodeLogin: { isEnabled: () => boolean; toggle: () => void }
+  // The website folder the agent can read and edit; the label says which one (or that there is none).
+  projectFolder: { label: () => string; isSet: () => boolean; choose: () => void; clear: () => void }
   // Asks the user to confirm, then signs the daemon out of that OAuth account.
   signOut: (account: SignOutAccount) => void
   signInToChatGpt: () => void
@@ -27,7 +29,7 @@ function loadIcon(name: IconName): NativeImage {
 }
 
 export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
-  const { bridge, getUpdate, claudeCodeLogin, signOut, signInToChatGpt, checkForUpdates } = args
+  const { bridge, getUpdate, claudeCodeLogin, projectFolder, signOut, signInToChatGpt, checkForUpdates } = args
   // Colored images, not template ones: a template image is tinted by the menu bar and can't be orange or green. @2x is
   // picked up automatically.
   const icons: Record<IconName, NativeImage> = {
@@ -51,6 +53,9 @@ export function createTrayMenu(args: CreateTrayMenuArgs): TrayMenu {
       { type: "separator" },
       { label: "Restart", click: () => void bridge.restart() },
       { label: "Show Logs", click: () => void shell.openPath(app.getPath("logs")) },
+      { label: projectFolder.label(), enabled: false },
+      { label: "Choose Project Folder…", click: () => projectFolder.choose() },
+      ...(projectFolder.isSet() ? [{ label: "Clear Project Folder", click: () => projectFolder.clear() }] : []),
       {
         label: "Use my Claude Code subscription (demo)",
         type: "checkbox",

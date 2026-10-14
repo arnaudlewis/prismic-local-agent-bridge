@@ -84,6 +84,13 @@ The menu, top to bottom:
   `Codex: <ChatGPT email>` or `not signed in`, and `Claude: <email> (<plan>)` in demo mode, otherwise `Claude: API key
   ...abcd`. Refreshed every 30 seconds, when a Page Builder connects, and after a sign-in or sign-out.
 - **Restart**, **Show Logs** (opens `~/Library/Logs/Prismic Agent/`).
+- **Project folder** (a line naming it), **Choose Project Folder...** and **Clear Project Folder**: the website folder
+  the agent works in, so it can change the code at the same time as the content in Prismic. It runs the daemon with
+  `--project <folder>` and restarts it. Without a folder the agent works in an empty private workspace. The folder is
+  remembered; if it has since been moved or deleted, the line says "(not found)" and the daemon starts without it.
+  The folder only sets where the agent starts: what it may change is decided by the mode picked in the panel (Codex
+  starts in `read-only`, Claude asks before every action), and a Documents, Desktop or Downloads folder makes macOS
+  ask once for access.
 - **Use my Claude Code subscription (demo)**: off by default, see "Claude Code demo mode".
 - **Open at Login**.
 - **Sign Out > Prismic / ChatGPT**: asks to confirm, then signs the daemon out and revokes the Prismic refresh token.

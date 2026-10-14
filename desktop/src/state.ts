@@ -6,6 +6,8 @@ export interface AppState {
   firstRunDone?: boolean
   // Demo only: run Claude on the Claude Code login of this Mac instead of an API key.
   claudeCodeLogin?: boolean
+  // The website folder the agent works in (the daemon's --project); the empty private workspace when unset.
+  projectDir?: string
   // The release the user was last notified about, so the notification shows once per release.
   notifiedVersion?: string
 }
@@ -26,6 +28,9 @@ export function createStateStore(userDataDir: string): StateStore {
       return {
         ...("firstRunDone" in parsed && parsed.firstRunDone === true ? { firstRunDone: true } : {}),
         ...("claudeCodeLogin" in parsed && parsed.claudeCodeLogin === true ? { claudeCodeLogin: true } : {}),
+        ...("projectDir" in parsed && typeof parsed.projectDir === "string" && parsed.projectDir !== ""
+          ? { projectDir: parsed.projectDir }
+          : {}),
         ...("notifiedVersion" in parsed && typeof parsed.notifiedVersion === "string"
           ? { notifiedVersion: parsed.notifiedVersion }
           : {}),

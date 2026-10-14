@@ -1,4 +1,5 @@
-import { join } from "node:path"
+import { statSync } from "node:fs"
+import { basename, join } from "node:path"
 import { Notification, app, dialog, shell } from "electron"
 
 import { createBridgeProcess } from "./bridgeProcess.ts"
@@ -30,7 +31,7 @@ function run(): void {
     cliPath: join(resources, "bridge", "src", "cli.ts"),
     cwd: join(resources, "bridge"),
     logsDir: app.getPath("logs"),
-    extraArgs: () => (state?.get().claudeCodeLogin === true ? ["--claude-code-login"] : []),
+    extraArgs: daemonArgs,
     onChange: onBridgeChange,
     onAccounts: () => tray?.refresh(),
   })
@@ -74,12 +75,56 @@ function run(): void {
       bridge,
       getUpdate: () => update,
       claudeCodeLogin: { isEnabled: () => state?.get().claudeCodeLogin === true, toggle: () => void toggleClaudeCodeLogin() },
+      projectFolder: {
+        label: projectFolderLabel,
+        isSet: () => state?.get().projectDir !== undefined,
+        choose: () => void chooseProjectFolder(),
+        clear: () => void clearProjectFolder(),
+      },
       signOut: (account) => void confirmAndSignOut(account),
       signInToChatGpt: () => void startChatGptSignIn(),
       checkForUpdates: () => void checkForUpdatesNow(),
     })
     bridge.start()
     startUpdateChecks({ currentVersion: app.getVersion(), onUpdate: onUpdateFound })
+  }
+
+  // Read at every daemon start. A folder that has gone is left out: the daemon refuses a --project that doesn't exist
+  // and would never start.
+  function daemonArgs(): string[] {
+    const projectDir = state?.get().projectDir
+    return [
+      ...(state?.get().claudeCodeLogin === true ? ["--claude-code-login"] : []),
+      ...(projectDir !== undefined && isDirectory(projectDir) ? ["--project", projectDir] : []),
+    ]
+  }
+
+  function projectFolderLabel(): string {
+    const projectDir = state?.get().projectDir
+    if (projectDir === undefined) return "Project folder: none (empty workspace)"
+    return isDirectory(projectDir) ? `Project folder: ${basename(projectDir)}` : `Project folder: ${basename(projectDir)} (not found)`
+  }
+
+  // The folder the agent works in: it reads it, and edits it as far as the mode picked in the panel allows.
+  async function chooseProjectFolder(): Promise<void> {
+    if (state === undefined) return
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: "Choose the website folder the agent works in",
+      buttonLabel: "Use This Folder",
+      properties: ["openDirectory", "createDirectory"],
+    })
+    const [chosen] = filePaths
+    if (canceled || chosen === undefined || chosen === state.get().projectDir) return
+    state.update({ projectDir: chosen })
+    await bridge.restart()
+    tray?.refresh()
+  }
+
+  async function clearProjectFolder(): Promise<void> {
+    if (state === undefined) return
+    state.update({ projectDir: undefined })
+    await bridge.restart()
+    tray?.refresh()
   }
 
   function onBridgeChange(next: BridgeState): void {
@@ -227,5 +272,13 @@ function run(): void {
   function isNewerCopy(data: unknown): boolean {
     if (typeof data !== "object" || data === null || !("version" in data)) return false
     return typeof data.version === "string" && isNewerVersion(data.version, app.getVersion())
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
   }
 }
